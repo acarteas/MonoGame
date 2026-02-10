@@ -465,6 +465,7 @@ static void MGVK_BufferCopyAndFlush(MGG_GraphicsDevice* device, MGG_Buffer* buff
 static MGG_Buffer* MGVK_Buffer_Create(MGG_GraphicsDevice* device, MGBufferType type, mgint sizeInBytes, bool no_push);
 static void MGVK_DestroyPipelines(MGG_GraphicsDevice* device, std::function<bool(const MGVK_PipelineState&)> compare);
 static void MGVK_DestroyFrameResources(MGG_GraphicsDevice* device, mgint currentFrame, mgbyte free_all);
+static void MGVK_DestroyPipelines(MGG_GraphicsDevice* device, std::function<bool(const MGVK_PipelineState&)> compare);
 static void MGVK_UpdateRenderPass(MGG_GraphicsDevice* device, FrameCounter currentFrame, MGVK_CmdBuffer& cmd);
 static VkCommandBuffer MGVK_BeginNewCommandBuffer(MGG_GraphicsDevice* device);
 static void MGVK_ExecuteAndFreeCommandBuffer(MGG_GraphicsDevice* device, VkCommandBuffer commandBuffer);
@@ -708,6 +709,89 @@ static VkImageAspectFlags DetermineAspectMask(VkFormat format)
 		break;
 	}
 	return result;
+}
+
+static bool MGVK_FormatHasStencilComponent(VkFormat format)
+{
+	return (DetermineAspectMask(format) & VK_IMAGE_ASPECT_STENCIL_BIT) != 0;
+}
+
+static bool MGVK_IsDepthFormatSupported(MGG_GraphicsDevice* device, VkFormat format, VkSampleCountFlagBits sampleCount)
+{
+	if (device == nullptr || format == VK_FORMAT_UNDEFINED)
+		return false;
+
+	VkFormatProperties formatProperties = {};
+	vkGetPhysicalDeviceFormatProperties(device->physicalDevice, format, &formatProperties);
+	if ((formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) == 0)
+		return false;
+
+	VkImageFormatProperties imageProperties = {};
+	VkResult result = vkGetPhysicalDeviceImageFormatProperties(
+		device->physicalDevice,
+		format,
+		VK_IMAGE_TYPE_2D,
+		VK_IMAGE_TILING_OPTIMAL,
+		VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+		0,
+		&imageProperties);
+
+	if (result != VK_SUCCESS)
+		return false;
+
+	return (imageProperties.sampleCounts & sampleCount) != 0;
+}
+
+static VkFormat MGVK_PickSupportedDepthFormat(MGG_GraphicsDevice* device, VkFormat requestedFormat, mgint multiSampleCount)
+{
+	if (requestedFormat == VK_FORMAT_UNDEFINED)
+		return VK_FORMAT_UNDEFINED;
+
+	const VkSampleCountFlagBits requestedSamples = ToVkSampleCount(multiSampleCount);
+	if (MGVK_IsDepthFormatSupported(device, requestedFormat, requestedSamples))
+		return requestedFormat;
+
+	const bool needsStencil = MGVK_FormatHasStencilComponent(requestedFormat);
+
+	const VkFormat stencilCandidates[] =
+	{
+		VK_FORMAT_D24_UNORM_S8_UINT,
+		VK_FORMAT_D32_SFLOAT_S8_UINT,
+		VK_FORMAT_D16_UNORM_S8_UINT,
+	};
+
+	const VkFormat depthOnlyCandidates[] =
+	{
+		VK_FORMAT_D32_SFLOAT,
+		VK_FORMAT_D16_UNORM,
+		VK_FORMAT_X8_D24_UNORM_PACK32,
+	};
+
+	if (needsStencil)
+	{
+		for (VkFormat format : stencilCandidates)
+		{
+			if (MGVK_IsDepthFormatSupported(device, format, requestedSamples))
+				return format;
+		}
+	}
+	else
+	{
+		for (VkFormat format : depthOnlyCandidates)
+		{
+			if (MGVK_IsDepthFormatSupported(device, format, requestedSamples))
+				return format;
+		}
+
+		// As a last resort accept stencil-capable formats if depth-only formats are unavailable.
+		for (VkFormat format : stencilCandidates)
+		{
+			if (MGVK_IsDepthFormatSupported(device, format, requestedSamples))
+				return format;
+		}
+	}
+
+	return VK_FORMAT_UNDEFINED;
 }
 
 bool AreValidationLayersSupported()
@@ -1393,6 +1477,11 @@ MGG_GraphicsDevice* MGG_GraphicsDevice_Create(MGG_GraphicsSystem* system, MGG_Gr
 static void cleanupSwapChain(MGG_GraphicsDevice* device)
 {
 	vkQueueWaitIdle(device->queue);
+
+	// Swapchain-dependent state must be invalidated before we destroy cached objects.
+	device->inRenderPass = false;
+	device->renderTargetDirty = true;
+	device->pipelineStateDirty = true;
 	 
 	// Destroy all the frame resources.
 
@@ -1445,6 +1534,19 @@ static void cleanupSwapChain(MGG_GraphicsDevice* device)
 			++itr;
 		}
 	}
+
+	// If no cache entry reset it yet, clear stale pointer defensively.
+	bool currentTargetSetValid = false;
+	for (auto& pair : cache)
+	{
+		if (pair.second == device->pipelineState.targets)
+		{
+			currentTargetSetValid = true;
+			break;
+		}
+	}
+	if (!currentTargetSetValid)
+		device->pipelineState.targets = nullptr;
 
 	// Cleanup the swap chain images.
 	for (size_t i = 0; i < device->swapchainCount; i++)
@@ -1576,10 +1678,12 @@ void MGVK_RecreateSwapChain(
 #error Not Implemented
 #endif
 
+	VkFormat selectedDepthFormat = MGVK_PickSupportedDepthFormat(device, vkDepth, 1);
+
 	if (width == device->swapchainWidth &&
 		height == device->swapchainHeight &&
 		vkColor == device->colorFormat &&
-		vkDepth == device->depthFormat &&
+		selectedDepthFormat == device->depthFormat &&
 		syncInterval == device->syncInterval &&
 		device->swapchain != VK_NULL_HANDLE)
 		return;
@@ -1598,7 +1702,7 @@ void MGVK_RecreateSwapChain(
 	device->swapchainWidth = std::clamp(width, surface_capabilities.minImageExtent.width, surface_capabilities.maxImageExtent.width);
 	device->swapchainHeight = std::clamp(height, surface_capabilities.minImageExtent.height, surface_capabilities.maxImageExtent.height);
 	device->colorFormat = vkColor;
-	device->depthFormat = vkDepth;
+	device->depthFormat = selectedDepthFormat;
 
 	// Check if the requested color format is supported, and fallback to another one otherwise.
 	VkFormat surface_format = VK_FORMAT_UNDEFINED;
@@ -2377,27 +2481,45 @@ void MGG_GraphicsDevice_SetScissorRectangle(MGG_GraphicsDevice* device, mgint x,
 
 void MGG_GraphicsDevice_SetRenderTargets(MGG_GraphicsDevice* device, MGG_Texture** targets, mgint* arraySlices, mgint count)
 {
-	assert(device != nullptr);
+    assert(device != nullptr);
 
-	if (targets == nullptr || count == 0)
-	{
-		auto currentFrame = device->frame;
-		auto frameIndex = currentFrame % device->swapchainCount;
-		auto& frame = device->frames[frameIndex];
+    if (targets == nullptr || count == 0)
+    {
+        // Ensure frames are initialized before accessing
+        if (device->frames == nullptr || device->swapchainCount == 0)
+        {
+            // Device not fully initialized yet, mark as dirty and return
+            device->pipelineStateDirty = true;
+            device->renderTargetDirty = true;
+            return;
+        }
 
-		device->targets.targets[0] = frame.swapchainTexture;
+        auto frameIndex = device->swapchain_image_index;
+        if (frameIndex >= device->swapchainCount)
+            frameIndex = device->frame % device->swapchainCount;
+        auto& frame = device->frames[frameIndex];
+
+        // Ensure swapchain texture exists
+        if (frame.swapchainTexture == nullptr)
+        {
+            device->pipelineStateDirty = true;
+            device->renderTargetDirty = true;
+            return;
+        }
+
+        device->targets.targets[0] = frame.swapchainTexture;
         memset(device->targets.targets + 1, 0, sizeof(MGG_Texture*) * (MGVK_NUM_TARGETS - 1));
-		device->targets.numTargets = 1;
+        device->targets.numTargets = 1;
         for (int i = 0; i < MGVK_NUM_TARGETS; i++)
         {
             device->targets.arraySlices[i] = std::nullopt;
         }
-	}
-	else
-	{
-		memcpy(device->targets.targets, targets, count * sizeof(MGG_Texture*));
+    }
+    else
+    {
+        memcpy(device->targets.targets, targets, count * sizeof(MGG_Texture*));
         memset(device->targets.targets + count, 0, (MGVK_NUM_TARGETS - count) * sizeof(MGG_Texture*));
-		device->targets.numTargets = count;
+        device->targets.numTargets = count;
 
         if (arraySlices)
         {
@@ -2420,10 +2542,10 @@ void MGG_GraphicsDevice_SetRenderTargets(MGG_GraphicsDevice* device, MGG_Texture
                 device->targets.arraySlices[i] = std::nullopt;
             }
         }
-	}
+    }
 
-	device->pipelineStateDirty = true;
-	device->renderTargetDirty = true;
+    device->pipelineStateDirty = true;
+    device->renderTargetDirty = true;
 }
 
 void MGG_GraphicsDevice_SetConstantBuffer(MGG_GraphicsDevice* device, MGShaderStage stage, mgint slot, MGG_Buffer* buffer)
@@ -3621,12 +3743,30 @@ uint32_t getVkFormatBlockAlignment(VkFormat format) {
 void MGG_GraphicsDevice_ResolveRenderTargets(MGG_GraphicsDevice* device)
 {
 	assert(device != nullptr);
-	
+    
     auto psoTargets = device->pipelineState.targets;
     if (!psoTargets)
         return;
 
+    // Check if any render target actually needs mipmap generation
+    bool needsMipmapGeneration = false;
+    for (int i = 0; i < psoTargets->set.numTargets; ++i)
+    {
+        MGG_Texture* renderTarget = psoTargets->set.targets[i];
+        if (renderTarget != nullptr && !renderTarget->isSwapchain && renderTarget->info.mipLevels > 1)
+        {
+            needsMipmapGeneration = true;
+            break;
+        }
+    }
+
+    // Early exit if no mipmap generation is needed - avoids submitting empty command buffers
+    if (!needsMipmapGeneration)
+        return;
+
     VkCommandBuffer cmd = MGVK_BeginNewCommandBuffer(device);
+    if (cmd == VK_NULL_HANDLE)
+        return;
 
     for (int i = 0; i < psoTargets->set.numTargets; ++i)
     {
@@ -4792,10 +4932,16 @@ MGG_Texture* MGG_RenderTarget_Create(
 
 	if (depthFormat != MGDepthFormat::None)
 	{
-        texture->depthTexture = CreateDepthTexture(device, ToVkFormat(depthFormat), width, height, multiSampleCount);
-		VK_SET_OBJECT_NAME(device->device, texture->depthTexture->image, VK_OBJECT_TYPE_IMAGE, "MGG_Texture.depthTexture.image (for RT id: %llu)", texture->id);
-		texture->depthTexture->target_view = CreateImageView(device, texture->depthTexture, 1);
-		VK_SET_OBJECT_NAME(device->device, texture->depthTexture->target_view, VK_OBJECT_TYPE_IMAGE_VIEW, "MGG_Texture.depthTexture.target_view (for RT id: %llu)", texture->id);
+		const VkFormat requestedDepthFormat = ToVkFormat(depthFormat);
+		const VkFormat selectedDepthFormat = MGVK_PickSupportedDepthFormat(device, requestedDepthFormat, multiSampleCount);
+
+		if (selectedDepthFormat != VK_FORMAT_UNDEFINED)
+		{
+	        texture->depthTexture = CreateDepthTexture(device, selectedDepthFormat, width, height, multiSampleCount);
+			VK_SET_OBJECT_NAME(device->device, texture->depthTexture->image, VK_OBJECT_TYPE_IMAGE, "MGG_Texture.depthTexture.image (for RT id: %llu)", texture->id);
+			texture->depthTexture->target_view = CreateImageView(device, texture->depthTexture, 1);
+			VK_SET_OBJECT_NAME(device->device, texture->depthTexture->target_view, VK_OBJECT_TYPE_IMAGE_VIEW, "MGG_Texture.depthTexture.target_view (for RT id: %llu)", texture->id);
+		}
 	}
 
 	//device->all_textures.push_back(texture);
