@@ -201,6 +201,8 @@ struct MGG_GraphicsAdapter
 };
 
 const int MAX_TEXTURE_SLOTS = 16;
+const uint32_t TEXTURE_SLOT_BINDING_OFFSET = 32;
+const uint32_t SAMPLER_SLOT_BINDING_OFFSET = 48;
 
 struct MGG_GraphicsDevice
 {
@@ -3102,7 +3104,9 @@ static void MGVK_UpdateDescriptors(MGG_GraphicsDevice* device, FrameCounter curr
 	if ((device->uniformsDirty & shader->uniformSlots) == 0 &&
 		(device->textureSamplerDirty & shader->textureSlots) == 0 &&
 		(device->textureSamplerDirty & shader->samplerSlots) == 0)
+	{
 		return;
+	}
 
 	// If we got here we must have some sort of bindings!
 	assert(!shader->bindings.empty());
@@ -3120,22 +3124,46 @@ static void MGVK_UpdateDescriptors(MGG_GraphicsDevice* device, FrameCounter curr
 	// First generate a hash of the new state.
 	uint32_t hash = MG_ComputeHash(shader->uniformSlots);
 	hash = MG_ComputeHash(shader->textureSlots, hash);
+	hash = MG_ComputeHash(shader->samplerSlots, hash);
+
 	uint32_t dirty = shader->textureSlots;
-	for (int i = 0; i < 16; i++)
+	for (int i = 0; i < MAX_TEXTURE_SLOTS; i++)
 	{
 		uint32_t mask = 1 << i;
 		if ((dirty & mask) == 0)
+		{
 			continue;
+		}
 
 		device->textures[i]->frame = currentFrame;
 
 		hash = MG_ComputeHash(device->textures[i]->id, hash);
+
+		// Early out if there are no more used slots.
+		dirty &= ~mask;
+		if (!dirty)
+		{
+			break;
+		}
+	}
+
+	dirty = shader->samplerSlots;
+	for (int i = 0; i < MAX_TEXTURE_SLOTS; i++)
+	{
+		uint32_t mask = 1 << i;
+		if ((dirty & mask) == 0)
+		{
+			continue;
+		}
+
 		hash = MG_ComputeHash(device->samplers[i]->id, hash);
 
 		// Early out if there are no more used slots.
 		dirty &= ~mask;
 		if (!dirty)
+		{
 			break;
+		}
 	}
 
 	// We hash the frameIndex because each frame in the swap chain has its
@@ -3181,8 +3209,28 @@ static void MGVK_UpdateDescriptors(MGG_GraphicsDevice* device, FrameCounter curr
 			}
 			else if (w.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
 			{
-				int slot = w.dstBinding - 32;
+				int slot = (int)w.dstBinding - (int)TEXTURE_SLOT_BINDING_OFFSET;
+				assert(slot >= 0 && slot < MAX_TEXTURE_SLOTS);
 				((VkDescriptorImageInfo*)w.pImageInfo)->imageView = device->textures[slot]->view;
+				((VkDescriptorImageInfo*)w.pImageInfo)->sampler = device->samplers[slot]->sampler;
+			}
+			else if (w.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE)
+			{
+				int slot = (int)w.dstBinding - (int)TEXTURE_SLOT_BINDING_OFFSET;
+				assert(slot >= 0 && slot < MAX_TEXTURE_SLOTS);
+				((VkDescriptorImageInfo*)w.pImageInfo)->imageView = device->textures[slot]->view;
+				((VkDescriptorImageInfo*)w.pImageInfo)->sampler = nullptr;
+			}
+			else if (w.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER)
+			{
+				int slot = (int)w.dstBinding - (int)SAMPLER_SLOT_BINDING_OFFSET;
+				if (slot < 0 || slot >= MAX_TEXTURE_SLOTS)
+				{
+					// Backward compatibility for older effects that shifted samplers with the texture offset.
+					slot = (int)w.dstBinding - (int)TEXTURE_SLOT_BINDING_OFFSET;
+				}
+				assert(slot >= 0 && slot < MAX_TEXTURE_SLOTS);
+				((VkDescriptorImageInfo*)w.pImageInfo)->imageView = nullptr;
 				((VkDescriptorImageInfo*)w.pImageInfo)->sampler = device->samplers[slot]->sampler;
 			}
 			else
@@ -5306,7 +5354,9 @@ MGG_Shader* MGG_Shader_Create(MGG_GraphicsDevice* device, MGShaderStage stage, m
 
 			write++;
 		}
-		else if (b.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+		else if (b.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+			b.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+			b.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER)
 		{
 			imageInfo->imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 			imageInfo->imageView = nullptr;
@@ -5317,7 +5367,7 @@ MGG_Shader* MGG_Shader_Create(MGG_GraphicsDevice* device, MGShaderStage stage, m
 			write->dstSet = nullptr;
 			write->dstBinding = b.binding;
 			write->dstArrayElement = 0;
-			write->descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			write->descriptorType = b.descriptorType;
 			write->descriptorCount = 1;
 			write->pImageInfo = imageInfo++;
 			write->pBufferInfo = nullptr;
