@@ -108,7 +108,8 @@ namespace MonoGame.Effect
 
         internal override ShaderData CreateShader(ShaderResult shaderResult, string shaderFunction, string shaderProfile, bool isVertexShader, EffectObject effect, ref string errorsAndWarnings)
         {
-            const int SlotOffset = 32;
+            const int TextureSlotOffset = 32;
+            const int SamplerSlotOffset = 48;
 
             var outputPath = Path.GetDirectoryName(shaderResult.OutputFilePath);
             var sourceFileName = Path.GetFileNameWithoutExtension(shaderResult.FilePath) + "." + shaderFunction;
@@ -176,13 +177,13 @@ namespace MonoGame.Effect
                 // a fixed amount here and in the shader layout creation.
                 if (isVertexShader)
                 {
-                    toolArgs += $"-fvk-t-shift {SlotOffset} 0 ";
-                    toolArgs += $"-fvk-s-shift {SlotOffset} 0 ";
+                    toolArgs += $"-fvk-t-shift {TextureSlotOffset} 0 ";
+                    toolArgs += $"-fvk-s-shift {SamplerSlotOffset} 0 ";
                 }
                 else
                 {
-                    toolArgs += $"-fvk-t-shift {SlotOffset} 1 ";
-                    toolArgs += $"-fvk-s-shift {SlotOffset} 1 ";
+                    toolArgs += $"-fvk-t-shift {TextureSlotOffset} 1 ";
+                    toolArgs += $"-fvk-s-shift {SamplerSlotOffset} 1 ";
                 }
 
                 //toolArgs += "-Qstrip_reflect ";
@@ -292,9 +293,9 @@ namespace MonoGame.Effect
 
                             var sampler = new ShaderData.Sampler
                             {
-                                samplerSlot = (int)samplerVariable.BindingSlot.Value - SlotOffset,
+                                samplerSlot = (int)samplerVariable.BindingSlot.Value - SamplerSlotOffset,
                                 samplerName = samplerVariable.Name,
-                                textureSlot = (int)imageVariable.BindingSlot.Value - SlotOffset,
+                                textureSlot = (int)imageVariable.BindingSlot.Value - TextureSlotOffset,
                             };
 
                             // This image is only sampled by one sampler, we can safely use the texture name for the parameter.
@@ -437,28 +438,28 @@ namespace MonoGame.Effect
                         bindings.Add(binding);
                     }
 
+                    var seenSamplerBindings = new HashSet<uint>();
+                    var seenTextureBindings = new HashSet<uint>();
+
                     foreach (var s in samplers)
                     {
-                        if (s.textureSlot == s.samplerSlot)
+                        samplerSlots |= (uint)(1 << s.samplerSlot);
+                        var samplerBinding = (uint)(s.samplerSlot + SamplerSlotOffset);
+                        if (seenSamplerBindings.Add(samplerBinding))
                         {
-                            textureSlots |= (uint)(1 << s.textureSlot);
-                            samplerSlots |= (uint)(1 << s.textureSlot);
-                            binding.binding = (uint)(s.textureSlot + SlotOffset);
-                            binding.descriptorType = VkDescriptorType.COMBINED_IMAGE_SAMPLER;
+                            binding.binding = samplerBinding;
+                            binding.descriptorType = VkDescriptorType.SAMPLER;
                             bindings.Add(binding);
-
-                            continue;
                         }
 
-                        samplerSlots |= (uint)(1 << s.samplerSlot);
-                        binding.binding = (uint)(s.samplerSlot + SlotOffset);
-                        binding.descriptorType = VkDescriptorType.SAMPLER;
-                        bindings.Add(binding);
-
                         textureSlots |= (uint)(1 << s.textureSlot);
-                        binding.binding = (uint)(s.textureSlot + SlotOffset);
-                        binding.descriptorType = VkDescriptorType.SAMPLED_IMAGE;
-                        bindings.Add(binding);
+                        var textureBinding = (uint)(s.textureSlot + TextureSlotOffset);
+                        if (seenTextureBindings.Add(textureBinding))
+                        {
+                            binding.binding = textureBinding;
+                            binding.descriptorType = VkDescriptorType.SAMPLED_IMAGE;
+                            bindings.Add(binding);
+                        }
                     }
 
                     // Write the slot bits.
