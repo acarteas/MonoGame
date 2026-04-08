@@ -398,9 +398,7 @@ namespace MonoGame.Effect
                             }
                         }
 
-                        // TODO: These are unused at runtime under the
-                        // new native backends, we will remove them soon.               
-                        a.location = 0;
+                        a.location = input.Location.HasValue ? (int)input.Location.Value : attributes.Count;
                         a.name = string.Empty;
 
                         attributes.Add(a);

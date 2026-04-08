@@ -2600,17 +2600,16 @@ void MGG_GraphicsDevice_SetIndexBuffer(MGG_GraphicsDevice* device, MGIndexElemen
 	device->indexBufferSize = size;
 }
 
-void MGG_GraphicsDevice_SetVertexBuffer(MGG_GraphicsDevice* device, mgint slot, MGG_Buffer* buffer, mgint vertexOffset)
+void MGG_GraphicsDevice_SetVertexBuffer(MGG_GraphicsDevice* device, mgint slot, MGG_Buffer* buffer, mgint byteOffset)
 {
 	assert(device != nullptr);
 	assert(buffer != nullptr);
-
-	// TODO: Support multiple VB streams!
-	assert(slot == 0);
-	assert(vertexOffset == 0);
+	assert(slot >= 0);
+	assert(slot < 8);
+	assert(byteOffset >= 0);
 
 	device->vertexBuffers[slot] = buffer;
-	device->vertexOffsets[slot] = vertexOffset;
+	device->vertexOffsets[slot] = byteOffset;
 	device->vertexBuffersDirty |= 1 << slot;
 }
 
@@ -2678,6 +2677,33 @@ static void MGVK_CmdTransitionImageLayout(
 
 		sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 		destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+	}
+	else if (oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
+		newLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+	{
+		barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+		sourceStage = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+		destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+	}
+	else if (oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
+		newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+	{
+		barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+		sourceStage = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+		destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+	}
+	else if (oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
+		newLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+	{
+		barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+		sourceStage = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+		destinationStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 	}
 	else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
 	{
@@ -3564,26 +3590,30 @@ static void MGVK_UpdatePipeline(MGG_GraphicsDevice* device, MGVK_CmdBuffer& cmd,
 
 	if (device->vertexBuffersDirty)
 	{
-		// TODO: Fix multiple vertex streams!
-
 		int count = 0;
-		VkDeviceSize offsets[8];
-		VkBuffer buffers[8];
-		for (int i = 0; i < 8; i++)
+		if (device->pipelineState.layout != nullptr)
 		{
-			offsets[i] = device->vertexOffsets[i];
-			buffers[i] = nullptr;
-
-			auto buffer = device->vertexBuffers[i];
-			if (buffer)
-			{
-				buffer->frame = currentFrame;
-				buffers[i] = buffer->buffer;
-				count++;
-			}
+			count = device->pipelineState.layout->streamCount;
 		}
 
-		vkCmdBindVertexBuffers(cmd.buffer, 0, count, buffers, offsets);
+		assert(count >= 0);
+		assert(count <= 8);
+
+		VkDeviceSize offsets[8];
+		VkBuffer buffers[8];
+		for (int i = 0; i < count; i++)
+		{
+			offsets[i] = device->vertexOffsets[i];
+			auto buffer = device->vertexBuffers[i];
+			assert(buffer != nullptr);
+			buffer->frame = currentFrame;
+			buffers[i] = buffer->buffer;
+		}
+
+		if (count > 0)
+		{
+			vkCmdBindVertexBuffers(cmd.buffer, 0, count, buffers, offsets);
+		}
 
 		device->vertexBuffersDirty = 0;
 	}
@@ -4643,35 +4673,8 @@ static void MGVK_BufferCopyAndFlush(MGG_GraphicsDevice* device, MGG_Buffer* buff
 
 	buffer->dirty = false;
 
-	/*
-	// TODO: Store ranges and all buffers used in a frame
-	// so we can flush them before vkSubmit.
-	auto nonCoherentAtomSize = device->deviceProperties.limits.nonCoherentAtomSize;
-
-	uint32_t alignedOffset = destOffset;
-	if ((alignedOffset % nonCoherentAtomSize) != 0)
-		alignedOffset -= alignedOffset % nonCoherentAtomSize;
-
-	uint32_t alignedEnd = destOffset + dataBytes;
-	if ((alignedEnd % nonCoherentAtomSize) != 0)
-	{
-		alignedEnd += nonCoherentAtomSize - (alignedEnd % nonCoherentAtomSize);
-		if (alignedEnd >= buffer->dataSize)
-			alignedEnd = buffer->dataSize;
-	}
-
-	assert(alignedOffset < buffer->dataSize);
-	assert(alignedEnd <= buffer->dataSize);
-
-	uint32_t alignedSize = alignedEnd - alignedOffset;
-
-	VkMappedMemoryRange range = { VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE };
-	range.memory = buffer->memory;
-	range.offset = alignedOffset;
-	range.size = alignedSize;
-	VkResult res = vkFlushMappedMemoryRanges(device->device, 1, &range);
+	VkResult res = vmaFlushAllocation(device->allocator, buffer->allocation, destOffset, dataBytes);
 	VK_CHECK_RESULT(res);
-	*/
 }
 
 static void MGVK_BufferCopyAndFlush(MGG_GraphicsDevice* device, MGG_Buffer* buffer, int destOffset, mgbyte* data, mgint dataCount, mgint dataBytes, mgint dataStride)
@@ -4699,6 +4702,15 @@ static void MGVK_BufferCopyAndFlush(MGG_GraphicsDevice* device, MGG_Buffer* buff
 	}
 
 	buffer->dirty = false;
+
+	VkDeviceSize flushSize = (VkDeviceSize)dataCount * dataStride;
+	if (dataBytes < dataStride)
+	{
+		flushSize -= dataStride - dataBytes;
+	}
+
+	VkResult res = vmaFlushAllocation(device->allocator, buffer->allocation, destOffset, flushSize);
+	VK_CHECK_RESULT(res);
 }
 
 void MGG_Buffer_Destroy(MGG_GraphicsDevice* device, MGG_Buffer* buffer)
@@ -5214,7 +5226,7 @@ MGG_InputLayout* MGG_InputLayout_Create(
 			bindings[elements[i].VertexBufferSlot].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
 		}
 
-		attrs[i].location = i;
+		attrs[i].location = elements[i].Location;
 		attrs[i].binding = elements[i].VertexBufferSlot;
 		attrs[i].format = ToVkFormat(elements[i].Format);
 		attrs[i].offset = elements[i].AlignedByteOffset;

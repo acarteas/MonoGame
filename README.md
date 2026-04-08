@@ -4,6 +4,12 @@
  </a>
  <h1>MonoGame</h1>
 
+# Why Does This Fork Exist?
+This fork exists to patch issues that I've encountered during the development of a `DesktopVK` project related to Vulkan rendering.
+Because AI contributions are not allowed by upstream MonoGame, many of these edits cannot be merged into the official code.  Others
+targeting `DesktopVK` may find this fork useful but I make no guarantees of its correctness.   
+
+
  [![Join the chat at https://discord.gg/monogame](https://img.shields.io/discord/355231098122272778?style=flat-square&color=%237289DA&label=Discord%20server&logo=discord&logoColor=white)](https://discord.gg/monogame) 
  ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/monogame/monogame/main.yml?style=flat-square)
  [![Donate](https://img.shields.io/badge/donate-F1465A?style=flat-square&logo=monogame&logoColor=FFFFFF)](https://monogame.net/donate/) 

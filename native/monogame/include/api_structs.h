@@ -151,6 +151,7 @@ struct MGG_InputElement
 {
     MGVertexElementUsage SemanticUsage;
     mguint SemanticIndex;
+    mguint Location;
     mguint VertexBufferSlot;
     MGVertexElementFormat Format;
     mguint AlignedByteOffset;
@@ -246,4 +247,3 @@ struct MGP_ControllerCaps
     mgbool HasRightVibrationMotor;
     mgbool HasVoiceSupport;
 };
-
