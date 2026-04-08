@@ -4901,6 +4901,21 @@ MGG_Texture* MGG_Texture_Create(
 	mggCreateImage(device, &create_info, texture);
 	VK_SET_OBJECT_NAME(device->device, texture->image, VK_OBJECT_TYPE_IMAGE, "MGG_Texture.image (id: %llu)", texture->id);
 
+	VkCommandBuffer cmd = MGVK_BeginNewCommandBuffer(device);
+	MGVK_CmdTransitionImageLayout(
+		cmd,
+		texture->image,
+		VK_IMAGE_LAYOUT_UNDEFINED,
+		texture->optimal_layout,
+		DetermineAspectMask(create_info.format),
+		0,
+		mipmaps,
+		0,
+		slices
+	);
+	MGVK_ExecuteAndFreeCommandBuffer(device, cmd);
+	texture->layout = texture->optimal_layout;
+
 	texture->view = CreateImageView(device, texture, mipmaps);
 	VK_SET_OBJECT_NAME(device->device, texture->view, VK_OBJECT_TYPE_IMAGE_VIEW, "MGG_Texture.view (id: %llu)", texture->id);
 
@@ -5035,23 +5050,10 @@ static void MGVK_ClampAndValidateTextureRegion(
 	mgint& width, mgint& height, mgint& depth)
 {
 	assert(texture != nullptr);
-	mgint mipWidth, mipHeight, mipDepth;
+	mgint mipWidth = getMipScalar(level, texture->info.extent.width);
+	mgint mipHeight = getMipScalar(level, texture->info.extent.height);
+	mgint mipDepth = getMipScalar(level, texture->info.extent.depth);
 	auto alignment = getVkFormatBlockAlignment(texture->info.format);
-
-	// Calculate the dimensions of the specified mipmap level.
-	// Dimensions are halved at each level, with a minimum of 1.
-	if (alignment > 1)
-	{
-		mipWidth = getMipScalar(level, texture->info.extent.width, alignment);
-		mipHeight = getMipScalar(level, texture->info.extent.height, alignment);
-		mipDepth = getMipScalar(level, texture->info.extent.depth, alignment);
-	}
-	else
-	{
-		mipWidth = getMipScalar(level, texture->info.extent.width);
-		mipHeight = getMipScalar(level, texture->info.extent.height);
-		mipDepth = getMipScalar(level, texture->info.extent.depth);
-	}
 
 	// If width and height are 0, assume the user wants to operate on the whole mip level.
 	if (width == 0 && height == 0)
@@ -5072,6 +5074,22 @@ static void MGVK_ClampAndValidateTextureRegion(
 		if (depth == 0)
 		{
 			depth = mipDepth;
+		}
+	}
+
+	if (alignment > 1)
+	{
+		assert((x % alignment) == 0);
+		assert((y % alignment) == 0);
+
+		if (x + width < mipWidth)
+		{
+			assert((width % alignment) == 0);
+		}
+
+		if (y + height < mipHeight)
+		{
+			assert((height % alignment) == 0);
 		}
 	}
 
