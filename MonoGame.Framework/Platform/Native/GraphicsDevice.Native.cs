@@ -312,8 +312,9 @@ public partial class GraphicsDevice
             {
                 var vertexBufferBinding = _vertexBuffers.Get(slot);
                 var buffer = vertexBufferBinding.VertexBuffer;
+                var byteOffset = buffer.VertexDeclaration.VertexStride * vertexBufferBinding.VertexOffset;
 
-                MGG.GraphicsDevice_SetVertexBuffer(Handle, slot, buffer.Handle, vertexBufferBinding.VertexOffset);
+                MGG.GraphicsDevice_SetVertexBuffer(Handle, slot, buffer.Handle, byteOffset);
             }
         }
         _vertexConstantBuffers.SetConstantBuffers(this);

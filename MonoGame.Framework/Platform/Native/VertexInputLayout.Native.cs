@@ -13,7 +13,9 @@ partial class VertexInputLayout
 {
     public void GenerateInputElements(VertexAttribute[] inputs, out MGG_InputElement[] elements, out int[] strides)
     {
-        elements = new MGG_InputElement[inputs.Length];
+        var orderedInputs = inputs.OrderBy(x => x.location).ToArray();
+
+        elements = new MGG_InputElement[orderedInputs.Length];
         strides = new int[Count];
 
         var missingShaderInputs = false;
@@ -29,9 +31,15 @@ partial class VertexInputLayout
         // you may use the same model data for rendering shadows which just
         // need a position and rendering lighting which need position and a normal.
 
-        for (int i = 0; i < inputs.Length; i++)
+        for (int i = 0; i < orderedInputs.Length; i++)
         {
-            var attr = inputs[i];
+            var attr = orderedInputs[i];
+            if (attr.location < 0)
+            {
+                throw new InvalidOperationException(
+                    $"Shader input {attr.ToShaderSemantic()} is missing a valid attribute location."
+                );
+            }
 
             bool found = false;
 
@@ -47,7 +55,11 @@ partial class VertexInputLayout
                         vertexElement.UsageIndex == attr.index)
                     {
                         found = true;
-                        elements[i] = vertexElement.AsInputElement(j, instanceFrequencies);
+                        elements[i] = vertexElement.AsInputElement(
+                            j,
+                            instanceFrequencies,
+                            attr.location
+                        );
                         strides[j] = declaration.VertexStride;
                         break;
                     }
@@ -68,7 +80,7 @@ partial class VertexInputLayout
             var message = "An error occurred while preparing to draw. "
                         + "This is probably because the current vertex declaration does not include all the elements "
                         + "required by the current vertex shader. The current vertex declaration includes these elements: "
-                        + string.Join(", ", inputs.Select((x) => x.ToShaderSemantic())) + ".";
+                        + string.Join(", ", orderedInputs.Select((x) => x.ToShaderSemantic())) + ".";
 
             throw new InvalidOperationException(message);
         }

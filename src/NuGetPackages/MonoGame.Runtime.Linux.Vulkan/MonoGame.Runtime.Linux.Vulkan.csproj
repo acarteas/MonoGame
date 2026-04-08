@@ -1,5 +1,30 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))">
+    <MonoGameNativeRuntimeDir>$(MSBuildThisFileDirectory)..\..\..\native\monogame</MonoGameNativeRuntimeDir>
+    <MonoGameNativeRuntimeOutput>$(MSBuildThisFileDirectory)..\..\..\Artifacts\native\mgruntime\desktopvk\linux\Release\libmgruntime.so</MonoGameNativeRuntimeOutput>
+  </PropertyGroup>
+
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))">
+    <MonoGameNativeRuntimeInput Include="$(MSBuildThisFileDirectory)..\..\..\native\monogame\Makefile" />
+    <MonoGameNativeRuntimeInput Include="$(MSBuildThisFileDirectory)..\..\..\native\monogame\desktopvk.make" />
+    <MonoGameNativeRuntimeInput Include="$(MSBuildThisFileDirectory)..\..\..\native\monogame\premake5.lua" />
+    <MonoGameNativeRuntimeInput Include="$(MSBuildThisFileDirectory)..\..\..\native\monogame\**\*.c" />
+    <MonoGameNativeRuntimeInput Include="$(MSBuildThisFileDirectory)..\..\..\native\monogame\**\*.cpp" />
+    <MonoGameNativeRuntimeInput Include="$(MSBuildThisFileDirectory)..\..\..\native\monogame\**\*.h" />
+    <MonoGameNativeRuntimeInput Include="$(MSBuildThisFileDirectory)..\..\..\native\monogame\**\*.make" />
+  </ItemGroup>
+
+  <Target
+    Name="BuildMonoGameNativeLinuxVulkanRuntime"
+    BeforeTargets="PrepareForBuild"
+    Condition="$([MSBuild]::IsOSPlatform('Linux'))"
+    Inputs="@(MonoGameNativeRuntimeInput)"
+    Outputs="$(MonoGameNativeRuntimeOutput)">
+    <Message Importance="High" Text="Building MonoGame Linux Vulkan runtime (release)..." />
+    <Exec Command="make config=release" WorkingDirectory="$(MonoGameNativeRuntimeDir)" />
+  </Target>
+
   <ItemGroup>
     <Content Include="..\..\..\Artifacts\native\mgruntime\desktopvk\linux\Release\libmgruntime.so"
       Condition="Exists('..\..\..\Artifacts\native\mgruntime\desktopvk\linux\Release\libmgruntime.so')">
