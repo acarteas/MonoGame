@@ -14,6 +14,9 @@ partial class VertexInputLayout
     public void GenerateInputElements(VertexAttribute[] inputs, out MGG_InputElement[] elements, out int[] strides)
     {
         var orderedInputs = inputs.OrderBy(x => x.location).ToArray();
+        var fallbackToSequentialLocations = orderedInputs
+            .GroupBy(x => x.location)
+            .Any(x => x.Key < 0 || x.Count() > 1);
 
         elements = new MGG_InputElement[orderedInputs.Length];
         strides = new int[Count];
@@ -34,12 +37,7 @@ partial class VertexInputLayout
         for (int i = 0; i < orderedInputs.Length; i++)
         {
             var attr = orderedInputs[i];
-            if (attr.location < 0)
-            {
-                throw new InvalidOperationException(
-                    $"Shader input {attr.ToShaderSemantic()} is missing a valid attribute location."
-                );
-            }
+            var shaderLocation = fallbackToSequentialLocations ? i : attr.location;
 
             bool found = false;
 
@@ -58,7 +56,7 @@ partial class VertexInputLayout
                         elements[i] = vertexElement.AsInputElement(
                             j,
                             instanceFrequencies,
-                            attr.location
+                            shaderLocation
                         );
                         strides[j] = declaration.VertexStride;
                         break;
