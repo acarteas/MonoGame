@@ -2924,8 +2924,16 @@ static void MGVK_UpdateRenderPass(MGG_GraphicsDevice* device, FrameCounter curre
             if (isMsaa)
             {
                 desc.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-                desc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-                desc.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                if (target->isSwapchain)
+                {
+                    desc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                    desc.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+                }
+                else
+                {
+                    desc.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                    desc.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                }
             }
             else
             {
@@ -2943,7 +2951,7 @@ static void MGVK_UpdateRenderPass(MGG_GraphicsDevice* device, FrameCounter curre
                 {
                     desc.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
                     desc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-                    desc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                    desc.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
                     desc.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                 }
             }
@@ -2988,7 +2996,7 @@ static void MGVK_UpdateRenderPass(MGG_GraphicsDevice* device, FrameCounter curre
             desc.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
             desc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
             desc.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-            desc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; //
+            desc.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             desc.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 			num_attachments++;
 		}
@@ -3056,6 +3064,38 @@ static void MGVK_UpdateRenderPass(MGG_GraphicsDevice* device, FrameCounter curre
 
 	// Set the cache for the changed pipeline state.
 	device->pipelineState.targets = cached;
+
+    for (int i = 0; i < cached->set.numTargets; ++i)
+    {
+        auto target = cached->set.targets[i];
+        auto layer = cached->set.arraySlices[i];
+        assert(target);
+
+        if (target->isSwapchain)
+        {
+            continue;
+        }
+
+        if (target->layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+        {
+            uint32_t baseArrayLayer = layer.has_value() ? (uint32_t)layer.value() : 0;
+            uint32_t layerCount = layer.has_value() ? 1u : target->info.arrayLayers;
+
+            MGVK_CmdTransitionImageLayout(
+                cmd.buffer,
+                target->image,
+                target->layout,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                DetermineAspectMask(target->info.format),
+                0,
+                1,
+                baseArrayLayer,
+                layerCount
+            );
+
+            target->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        }
+    }
 
 	// Set default viewport and scissor.
 	MGG_GraphicsDevice_SetViewport(device, 0, 0, cached->width, cached->height, 0, 1);
