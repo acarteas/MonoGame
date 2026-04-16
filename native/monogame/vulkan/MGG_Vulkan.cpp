@@ -145,6 +145,26 @@ struct MGVK_TargetSetCache
     std::optional<VkImageView> arraySlicesViews[MGVK_NUM_TARGETS];
 };
 
+static uint32_t MGVK_ComputeTargetSetHash(const MGVK_TargetSet& targetSet)
+{
+    uint32_t hash = MG_ComputeHash((mguint)targetSet.numTargets);
+
+    for (int i = 0; i < MGVK_NUM_TARGETS; ++i)
+    {
+        MGG_Texture* target = targetSet.targets[i];
+        uintptr_t targetKey = reinterpret_cast<uintptr_t>(target);
+        bool hasArraySlice = targetSet.arraySlices[i].has_value();
+        uint32_t arraySlice = hasArraySlice ? (uint32_t)targetSet.arraySlices[i].value() : 0u;
+
+        hash = MG_ComputeHash((mguint)(targetKey & 0xFFFFFFFFu), hash);
+        hash = MG_ComputeHash((mguint)(targetKey >> 32), hash);
+        hash = MG_ComputeHash(hasArraySlice ? 1u : 0u, hash);
+        hash = MG_ComputeHash(arraySlice, hash);
+    }
+
+    return hash;
+}
+
 struct MGVK_PipelineState
 {
 	VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
@@ -2855,7 +2875,7 @@ static void MGVK_UpdateRenderPass(MGG_GraphicsDevice* device, FrameCounter curre
 	MGVK_EndRenderPass(device, cmd.buffer);
 
 	// Lookup the texture set in the cache.
-	uint32_t hash = MG_ComputeHash((mgbyte*)&device->targets, sizeof(MGVK_TargetSet));
+	uint32_t hash = MGVK_ComputeTargetSetHash(device->targets);
 	MGVK_TargetSetCache* cached = device->targetCache[hash];
     bool isMsaa;
 
