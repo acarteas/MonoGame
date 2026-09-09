@@ -147,6 +147,37 @@ struct MGVK_TargetSetCache
     std::optional<VkImageView> arraySlicesViews[MGVK_NUM_TARGETS];
 };
 
+static uint32_t MGVK_ComputeTargetSetHash(const MGVK_TargetSet& set)
+{
+	uint32_t hash = MG_ComputeHash((mguint)set.numTargets);
+	for (int i = 0; i < set.numTargets; ++i)
+	{
+		// Widen before shifting so this also works with 32-bit pointers.
+		const uint64_t target = reinterpret_cast<uintptr_t>(set.targets[i]);
+		hash = MG_ComputeHash((mguint)target, hash);
+		hash = MG_ComputeHash((mguint)(target >> 32), hash);
+		hash = MG_ComputeHash(set.firstUse[i] ? 1u : 0u, hash);
+		hash = MG_ComputeHash(set.arraySlices[i].has_value() ? 1u : 0u, hash);
+		hash = MG_ComputeHash((mguint)set.arraySlices[i].value_or(0), hash);
+	}
+	return hash;
+}
+
+static bool MGVK_TargetSetsEqual(const MGVK_TargetSet& a, const MGVK_TargetSet& b)
+{
+	if (a.numTargets != b.numTargets)
+		return false;
+
+	for (int i = 0; i < a.numTargets; ++i)
+	{
+		if (a.targets[i] != b.targets[i] ||
+			a.firstUse[i] != b.firstUse[i] ||
+			a.arraySlices[i] != b.arraySlices[i])
+			return false;
+	}
+	return true;
+}
+
 struct MGVK_PipelineState
 {
 	VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
@@ -322,7 +353,7 @@ struct MGG_GraphicsDevice
 	std::map<uint32_t, MGG_DepthStencilState*> depthStencilStates;
 
 	MGVK_TargetSet targets;
-	std::map<uint32_t, MGVK_TargetSetCache*> targetCache;
+	std::multimap<uint32_t, MGVK_TargetSetCache*> targetCache;
 
 
 	//
@@ -3100,8 +3131,18 @@ static void MGVK_UpdateRenderPass(MGG_GraphicsDevice* device, FrameCounter curre
 	}
 
 	// Lookup the texture set in the cache.
-	const uint32_t hash = MG_ComputeHash((mgbyte*)&device->targets, sizeof(MGVK_TargetSet));
-	MGVK_TargetSetCache* cached = device->targetCache[hash];
+	const uint32_t hash = MGVK_ComputeTargetSetHash(device->targets);
+	MGVK_TargetSetCache* cached = nullptr;
+	const auto matches = device->targetCache.equal_range(hash);
+	for (auto itr = matches.first; itr != matches.second; ++itr)
+	{
+		// A hash collision must not select another target set's framebuffer or render pass.
+		if (MGVK_TargetSetsEqual(itr->second->set, device->targets))
+		{
+			cached = itr->second;
+			break;
+		}
+	}
 
 	if (!cached)
 	{
@@ -3334,7 +3375,7 @@ static void MGVK_UpdateRenderPass(MGG_GraphicsDevice* device, FrameCounter curre
 			VK_SET_OBJECT_NAME(device->device, cached->framebuffer, VK_OBJECT_TYPE_FRAMEBUFFER, "MGVK_TargetSetCache.framebuffer (hash: %u)", hash);
 		}
 
-		device->targetCache[hash] = cached;
+		device->targetCache.emplace(hash, cached);
 	}
 
 	// Track our layout changes.
