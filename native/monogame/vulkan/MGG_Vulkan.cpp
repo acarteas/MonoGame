@@ -2844,7 +2844,7 @@ void MGG_GraphicsDevice_SetIndexBuffer(MGG_GraphicsDevice* device, MGIndexElemen
 	device->indexBufferSize = size;
 }
 
-void MGG_GraphicsDevice_SetVertexBuffer(MGG_GraphicsDevice* device, mgint slot, MGG_Buffer* buffer, mgint vertexOffset)
+void MGG_GraphicsDevice_SetVertexBuffer(MGG_GraphicsDevice* device, mgint slot, MGG_Buffer* buffer, mgint byteOffset)
 {
 	assert(device != nullptr);
 	assert(buffer != nullptr);
@@ -2852,7 +2852,7 @@ void MGG_GraphicsDevice_SetVertexBuffer(MGG_GraphicsDevice* device, mgint slot, 
 	assert(slot >= 0 && slot < 8);
 
 	device->vertexBuffers[slot] = buffer;
-	device->vertexOffsets[slot] = vertexOffset;
+	device->vertexOffsets[slot] = byteOffset;
 	device->vertexBuffersDirty |= 1 << slot;
 }
 

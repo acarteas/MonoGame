@@ -261,7 +261,7 @@ internal static unsafe partial class MGG
     public static extern void GraphicsDevice_SetIndexBuffer(MGG_GraphicsDevice* device, IndexElementSize size, MGG_Buffer* buffer);
 
     [DllImport(MGP.MonoGameNativeDLL, EntryPoint = "MGG_GraphicsDevice_SetVertexBuffer", ExactSpelling = true)]
-    public static extern void GraphicsDevice_SetVertexBuffer(MGG_GraphicsDevice* device, int slot, MGG_Buffer* buffer, int vertexOffset);
+    public static extern void GraphicsDevice_SetVertexBuffer(MGG_GraphicsDevice* device, int slot, MGG_Buffer* buffer, int byteOffset);
 
     [DllImport(MGP.MonoGameNativeDLL, EntryPoint = "MGG_GraphicsDevice_SetShader", ExactSpelling = true)]
     public static extern void GraphicsDevice_SetShader(MGG_GraphicsDevice* device, ShaderStage stage, MGG_Shader* shader);
