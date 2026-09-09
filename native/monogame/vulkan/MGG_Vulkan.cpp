@@ -235,6 +235,8 @@ struct MGVK_Transfer
 
 
 const int MAX_TEXTURE_SLOTS = 16;
+const int TEXTURE_SLOT_BINDING_OFFSET = 32;
+const int SAMPLER_SLOT_BINDING_OFFSET = 48;
 
 struct MGG_GraphicsDevice
 {
@@ -3437,6 +3439,7 @@ static void MGVK_UpdateDescriptors(MGG_GraphicsDevice* device, FrameCounter curr
 	// First generate a hash of the new state.
 	uint32_t hash = MG_ComputeHash(shader->uniformSlots);
 	hash = MG_ComputeHash(shader->textureSlots, hash);
+	hash = MG_ComputeHash(shader->samplerSlots, hash);
 	uint32_t dirty = shader->textureSlots;
 	for (int i = 0; i < MAX_TEXTURE_SLOTS; i++)
 	{
@@ -3453,14 +3456,20 @@ static void MGVK_UpdateDescriptors(MGG_GraphicsDevice* device, FrameCounter curr
 			hash = MG_ComputeHash(tex->id, hash);
 		}
 
-		auto sampler = device->samplers[(mgint)shader->stage][i];
-		if (sampler)
-			hash = MG_ComputeHash(sampler->id, hash);
-
 		// Early out if there are no more used slots.
 		dirty &= ~mask;
 		if (!dirty)
 			break;
+	}
+
+	// Samplers may use different slots from the textures they sample.
+	for (int i = 0; i < MAX_TEXTURE_SLOTS; i++)
+	{
+		if ((shader->samplerSlots & (1u << i)) == 0)
+			continue;
+
+		auto sampler = device->samplers[(mgint)shader->stage][i];
+		hash = MG_ComputeHash(sampler ? sampler->id : 0, hash);
 	}
 
 	// We hash the frameIndex because each frame in the swap chain has its
@@ -3506,7 +3515,8 @@ static void MGVK_UpdateDescriptors(MGG_GraphicsDevice* device, FrameCounter curr
 			}
 			else if (w.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
 			{
-				int slot = w.dstBinding - 32;
+				int slot = (int)w.dstBinding - TEXTURE_SLOT_BINDING_OFFSET;
+				assert(slot >= 0 && slot < MAX_TEXTURE_SLOTS);
 				((VkDescriptorImageInfo*)w.pImageInfo)->sampler = device->samplers[(mgint)shader->stage][slot]->sampler;
 
 				auto tex = device->textures[(mgint)shader->stage][slot];
@@ -3517,13 +3527,23 @@ static void MGVK_UpdateDescriptors(MGG_GraphicsDevice* device, FrameCounter curr
 			}
 			else if (w.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE)
 			{
-				int slot = w.dstBinding - 32;
+				int slot = (int)w.dstBinding - TEXTURE_SLOT_BINDING_OFFSET;
+				assert(slot >= 0 && slot < MAX_TEXTURE_SLOTS);
 
 				auto tex = device->textures[(mgint)shader->stage][slot];
 				if (tex)
 					((VkDescriptorImageInfo*)w.pImageInfo)->imageView = tex->view;
 				else
 					((VkDescriptorImageInfo*)w.pImageInfo)->imageView = device->nullTexture[(int)shader->textureTypes[slot]]->view;
+			}
+			else if (w.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER)
+			{
+				int slot = (int)w.dstBinding - SAMPLER_SLOT_BINDING_OFFSET;
+				// Older effects used the texture binding offset for separate samplers.
+				if (slot < 0 || slot >= MAX_TEXTURE_SLOTS)
+					slot = (int)w.dstBinding - TEXTURE_SLOT_BINDING_OFFSET;
+				assert(slot >= 0 && slot < MAX_TEXTURE_SLOTS);
+				((VkDescriptorImageInfo*)w.pImageInfo)->sampler = device->samplers[(mgint)shader->stage][slot]->sampler;
 			}
 			else
 			{
@@ -5681,7 +5701,9 @@ MGG_Shader* MGG_Shader_Create(MGG_GraphicsDevice* device, MGShaderStage stage, m
 
 			write++;
 		}
-		else if (b.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+		else if (b.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+			b.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+			b.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER)
 		{
 			imageInfo->imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 			imageInfo->imageView = nullptr;
@@ -5692,26 +5714,7 @@ MGG_Shader* MGG_Shader_Create(MGG_GraphicsDevice* device, MGShaderStage stage, m
 			write->dstSet = nullptr;
 			write->dstBinding = b.binding;
 			write->dstArrayElement = 0;
-			write->descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-			write->descriptorCount = 1;
-			write->pImageInfo = imageInfo++;
-			write->pBufferInfo = nullptr;
-			write->pTexelBufferView = nullptr;
-
-			write++;
-		}
-		else if (b.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE)
-		{
-			imageInfo->imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-			imageInfo->imageView = nullptr;
-			imageInfo->sampler = nullptr;
-
-			write->sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			write->pNext = nullptr;
-			write->dstSet = nullptr;
-			write->dstBinding = b.binding;
-			write->dstArrayElement = 0;
-			write->descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+			write->descriptorType = b.descriptorType;
 			write->descriptorCount = 1;
 			write->pImageInfo = imageInfo++;
 			write->pBufferInfo = nullptr;
