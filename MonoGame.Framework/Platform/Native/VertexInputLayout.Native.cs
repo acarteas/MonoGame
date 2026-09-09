@@ -47,7 +47,7 @@ partial class VertexInputLayout
                         vertexElement.UsageIndex == attr.index)
                     {
                         found = true;
-                        elements[i] = vertexElement.AsInputElement(j, instanceFrequencies);
+                        elements[i] = vertexElement.AsInputElement(j, instanceFrequencies, attr.location);
                         strides[j] = declaration.VertexStride;
                         break;
                     }

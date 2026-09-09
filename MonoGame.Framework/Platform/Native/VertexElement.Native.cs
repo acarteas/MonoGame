@@ -9,12 +9,13 @@ namespace Microsoft.Xna.Framework.Graphics;
 
 partial struct VertexElement
 {
-    internal MGG_InputElement AsInputElement(int vbSlot, int instanceFrequency)
+    internal MGG_InputElement AsInputElement(int vbSlot, int instanceFrequency, int shaderLocation)
     {
         var element = new MGG_InputElement();
 
         element.SemanticUsage = VertexElementUsage;
         element.SemanticIndex = (uint)this.UsageIndex;
+        element.Location = (uint)shaderLocation;
         element.VertexBufferSlot = (uint)vbSlot;
         element.Format = _format;
         element.AlignedByteOffset = (uint)_offset;

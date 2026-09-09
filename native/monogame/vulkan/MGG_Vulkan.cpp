@@ -5550,7 +5550,7 @@ MGG_InputLayout* MGG_InputLayout_Create(
 		const auto element = elements[i];
 		auto& attrib = layout->attributes[i];
 
-		attrib.location = i;
+		attrib.location = element.Location;
 		attrib.binding = element.VertexBufferSlot;
 		attrib.format = ToVkFormat(element.Format);
 		attrib.offset = element.AlignedByteOffset;

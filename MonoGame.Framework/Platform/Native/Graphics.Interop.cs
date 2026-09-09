@@ -129,6 +129,7 @@ internal struct MGG_InputElement
 {
     public VertexElementUsage SemanticUsage;
     public uint SemanticIndex;
+    public uint Location;
     public uint VertexBufferSlot;
     public VertexElementFormat Format;
     public uint AlignedByteOffset;

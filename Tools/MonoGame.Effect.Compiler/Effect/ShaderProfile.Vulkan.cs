@@ -486,6 +486,12 @@ namespace MonoGame.Effect
                             locationCount = spirvTypeMatrix.Columns;
                         }
 
+                        if (!input.Location.HasValue)
+                        {
+                            errorsAndWarnings += $"Vulkan vertex input '{semanticId}' has no SPIR-V location.\n";
+                            throw new ShaderCompilerException();
+                        }
+
                         for (int locationIndex = 0; locationIndex < locationCount; locationIndex++)
                         {
                             var a = new ShaderData.Attribute
@@ -493,9 +499,8 @@ namespace MonoGame.Effect
                                 usage = usage,
                                 index = indexOffset + locationIndex,
 
-                                // TODO: These are unused at runtime under the
-                                // new native backends, we will remove them soon.
-                                location = 0,
+                                // Matrix columns and array elements occupy consecutive locations.
+                                location = checked((int)input.Location.Value + locationIndex),
                                 name = string.Empty,
                             };
 
