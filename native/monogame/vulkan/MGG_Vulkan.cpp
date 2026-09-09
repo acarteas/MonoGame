@@ -1120,8 +1120,80 @@ static void mggCreateImage(MGG_GraphicsDevice* device, VkImageCreateInfo* info, 
 	VK_CHECK_RESULT(res);
 }
 
+static bool MGVK_IsDepthFormatSupported(MGG_GraphicsDevice* device, VkFormat format,
+	uint32_t width, uint32_t height, VkSampleCountFlagBits samples)
+{
+	VkFormatProperties properties = {};
+	vkGetPhysicalDeviceFormatProperties(device->physicalDevice, format, &properties);
+	if ((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) == 0)
+		return false;
+
+	VkImageFormatProperties imageProperties = {};
+	VkResult result = vkGetPhysicalDeviceImageFormatProperties(device->physicalDevice, format,
+		VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+		0, &imageProperties);
+	return result == VK_SUCCESS && (imageProperties.sampleCounts & samples) != 0 &&
+		width <= imageProperties.maxExtent.width && height <= imageProperties.maxExtent.height;
+}
+
+static int MGVK_DepthBits(VkFormat format)
+{
+	switch (format)
+	{
+	case VK_FORMAT_D16_UNORM:
+	case VK_FORMAT_D16_UNORM_S8_UINT:
+		return 16;
+	case VK_FORMAT_X8_D24_UNORM_PACK32:
+	case VK_FORMAT_D24_UNORM_S8_UINT:
+		return 24;
+	default:
+		return 32;
+	}
+}
+
+static VkFormat MGVK_PickSupportedDepthFormat(MGG_GraphicsDevice* device, VkFormat requested,
+	uint32_t width, uint32_t height, mgint multiSampleCount)
+{
+	if (requested == VK_FORMAT_UNDEFINED)
+		return VK_FORMAT_UNDEFINED;
+
+	const auto samples = ToVkSampleCount(multiSampleCount);
+	if (MGVK_IsDepthFormatSupported(device, requested, width, height, samples))
+		return requested;
+
+	const bool needsStencil = (DetermineAspectMask(requested) & VK_IMAGE_ASPECT_STENCIL_BIT) != 0;
+	const VkFormat candidates[] = {
+		VK_FORMAT_D32_SFLOAT, VK_FORMAT_X8_D24_UNORM_PACK32, VK_FORMAT_D16_UNORM,
+		VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D16_UNORM_S8_UINT
+	};
+	for (auto candidate : candidates)
+	{
+		if (candidate == requested || MGVK_DepthBits(candidate) < MGVK_DepthBits(requested))
+			continue;
+		if (needsStencil && (DetermineAspectMask(candidate) & VK_IMAGE_ASPECT_STENCIL_BIT) == 0)
+			continue;
+		if (MGVK_IsDepthFormatSupported(device, candidate, width, height, samples))
+			return candidate;
+	}
+	return VK_FORMAT_UNDEFINED;
+}
+
 static MGG_Texture* CreateDepthTexture(MGG_GraphicsDevice* device, VkFormat format, uint32_t width, uint32_t height, mgint multiSampleCount)
 {
+	// Both swapchain and offscreen depth attachments use this path, after sample-count selection.
+	const VkFormat selected = MGVK_PickSupportedDepthFormat(device, format, width, height, multiSampleCount);
+	if (selected == VK_FORMAT_UNDEFINED)
+	{
+		fprintf(stderr, "Fatal: No compatible Vulkan depth format for format %d, %ux%u, %u samples.\n",
+			(int)format, width, height, (uint32_t)ToVkSampleCount(multiSampleCount));
+		// Do not continue with an invalid image or silently drop the requested depth/stencil buffer.
+		abort();
+	}
+	if (selected != format)
+		fprintf(stderr, "Vulkan: Using depth format %d instead of %d (%ux%u, %u samples).\n",
+			(int)selected, (int)format, width, height, (uint32_t)ToVkSampleCount(multiSampleCount));
+	format = selected;
+
 	// TODO: Could convert this into a
 	// general image creation method.
 
