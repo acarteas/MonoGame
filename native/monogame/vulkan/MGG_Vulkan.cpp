@@ -4942,10 +4942,18 @@ static void MGVK_BufferCopyAndFlush(MGG_GraphicsDevice* device, MGG_Buffer* buff
 {
 	assert(device);
 	assert(buffer);
+	assert(dataBytes >= 0);
+	if (dataBytes == 0)
+		return;
+
 	assert(destOffset < buffer->dataSize);
 	assert(destOffset + dataBytes <= buffer->dataSize);
 
 	memcpy(buffer->mapped + destOffset, data, dataBytes);
+
+	// Make writes visible to the GPU on non-coherent memory. VMA handles alignment.
+	VkResult res = vmaFlushAllocation(device->allocator, buffer->allocation, destOffset, dataBytes);
+	VK_CHECK_RESULT(res);
 	buffer->dirty = false;
 }
 
@@ -4953,6 +4961,11 @@ static void MGVK_BufferCopyAndFlush(MGG_GraphicsDevice* device, MGG_Buffer* buff
 {
 	assert(device);
 	assert(buffer);
+	assert(dataCount >= 0);
+	assert(dataBytes >= 0);
+	if (dataCount == 0 || dataBytes == 0)
+		return;
+
 	assert(destOffset < buffer->dataSize);
 	assert(dataStride >= dataBytes);
 	assert(destOffset + dataCount * dataStride + dataBytes - dataStride <= buffer->dataSize);
@@ -4973,6 +4986,10 @@ static void MGVK_BufferCopyAndFlush(MGG_GraphicsDevice* device, MGG_Buffer* buff
 		}
 	}
 
+	// Include the gaps between elements, but not the padding after the last one.
+	VkDeviceSize flushSize = (VkDeviceSize)(dataCount - 1) * dataStride + dataBytes;
+	VkResult res = vmaFlushAllocation(device->allocator, buffer->allocation, destOffset, flushSize);
+	VK_CHECK_RESULT(res);
 	buffer->dirty = false;
 }
 
