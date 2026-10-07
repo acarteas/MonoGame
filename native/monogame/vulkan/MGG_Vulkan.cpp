@@ -209,6 +209,7 @@ struct MGVK_Frame
 {
 	bool is_recording = false;
 	bool is_rendering = false;
+	bool imageAcquiredPending = false;
 	uint32_t image_index = -1;
 	uint32_t uniformOffset = 0;
 	MGG_Buffer* uniforms = nullptr;
@@ -1294,19 +1295,27 @@ static void MGVK_FlushCommands(MGG_GraphicsDevice* device, MGVK_Frame& frame)
 		VkFenceCreateInfo fenceCreateInfo = {};
 		fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 		fenceCreateInfo.flags = 0;
-		vkCreateFence(device->device, &fenceCreateInfo, nullptr, &renderFence);
+		VK_CHECK_RESULT(vkCreateFence(device->device, &fenceCreateInfo, nullptr, &renderFence));
 		VK_SET_OBJECT_NAME(device->device, renderFence, VK_OBJECT_TYPE_FENCE, "MGVK_FlushCommands.renderFence");
 	}
 
+	frame.is_recording = false;
+
+	// Only the first submission for this acquired image consumes its semaphore.
+	VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 	VkSubmitInfo submitInfo = {};
 	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submitInfo.waitSemaphoreCount = frame.imageAcquiredPending ? 1 : 0;
+	submitInfo.pWaitSemaphores = &frame.imageAcquiredSemaphore;
+	submitInfo.pWaitDstStageMask = &waitStage;
 	submitInfo.commandBufferCount = 1;
 	submitInfo.pCommandBuffers = &frame.commandBuffer;
 	{
 		std::lock_guard lock(device->queueMutex);
-		vkQueueSubmit(device->queue, 1, &submitInfo, renderFence);
+		VK_CHECK_RESULT(vkQueueSubmit(device->queue, 1, &submitInfo, renderFence));
+		frame.imageAcquiredPending = false;
 	}
-	vkWaitForFences(device->device, 1, &renderFence, VK_TRUE, UINT64_MAX);
+	VK_CHECK_RESULT(vkWaitForFences(device->device, 1, &renderFence, VK_TRUE, UINT64_MAX));
 	vkDestroyFence(device->device, renderFence, nullptr);
 }
 
@@ -1353,28 +1362,28 @@ static VkCommandBuffer MGVK_BeginNewCommandBuffer(MGG_GraphicsDevice* device, Vk
 	allocInfo.commandBufferCount = 1;
 
 	VkCommandBuffer commandBuffer;
-	vkAllocateCommandBuffers(device->device, &allocInfo, &commandBuffer);
+	VK_CHECK_RESULT(vkAllocateCommandBuffers(device->device, &allocInfo, &commandBuffer));
 	VK_SET_OBJECT_NAME(device->device, commandBuffer, VK_OBJECT_TYPE_COMMAND_BUFFER, "MGVK_BeginNewCommandBuffer::commandBuffer");
 
 	VkCommandBufferBeginInfo beginInfo = {};
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
-	vkBeginCommandBuffer(commandBuffer, &beginInfo);
+	VK_CHECK_RESULT(vkBeginCommandBuffer(commandBuffer, &beginInfo));
 
 	return commandBuffer;
 }
 
 static void MGVK_ExecuteAndFreeCommandBuffer(MGG_GraphicsDevice* device, VkCommandBuffer commandBuffer, VkCommandPool pool)
 {
-	vkEndCommandBuffer(commandBuffer);
+	VK_CHECK_RESULT(vkEndCommandBuffer(commandBuffer));
 
 	VkFence renderFence;
 	{
 		VkFenceCreateInfo fenceCreateInfo = {};
 		fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 		fenceCreateInfo.flags = 0;
-		vkCreateFence(device->device, &fenceCreateInfo, nullptr, &renderFence);
+		VK_CHECK_RESULT(vkCreateFence(device->device, &fenceCreateInfo, nullptr, &renderFence));
 		VK_SET_OBJECT_NAME(device->device, renderFence, VK_OBJECT_TYPE_FENCE, "MGVK_ExecuteAndFreeCommandBuffer.renderFence");
 	}
 
@@ -1386,10 +1395,10 @@ static void MGVK_ExecuteAndFreeCommandBuffer(MGG_GraphicsDevice* device, VkComma
 		submitInfo.commandBufferCount = 1;
 		submitInfo.pCommandBuffers = &commandBuffer;
 
-		vkQueueSubmit(device->queue, 1, &submitInfo, renderFence);
+		VK_CHECK_RESULT(vkQueueSubmit(device->queue, 1, &submitInfo, renderFence));
 	}
 
-	vkWaitForFences(device->device, 1, &renderFence, VK_TRUE, UINT64_MAX);
+	VK_CHECK_RESULT(vkWaitForFences(device->device, 1, &renderFence, VK_TRUE, UINT64_MAX));
 	vkDestroyFence(device->device, renderFence, nullptr);
 
 	pool = pool ? pool : device->cmdPool;
@@ -2108,6 +2117,9 @@ void MGVK_RecreateSwapChain(
 		}
 	}
 
+	// The frame ring can change size while the monotonic frame counter continues.
+	device->frameIndex = device->frame % device->swapchainCount;
+
 	std::vector<VkImage> swapchainImages(swapchainCount);
 	res = vkGetSwapchainImagesKHR(device->device, device->swapchain, &swapchainCount, swapchainImages.data());
 	VK_CHECK_RESULT(res);
@@ -2184,6 +2196,9 @@ void MGVK_RecreateSwapChain(
 	{
 		auto& frame = device->frames[i];
 		frame.image_index = -1;
+		frame.imageAcquiredPending = false;
+		frame.is_recording = false;
+		frame.is_rendering = false;
 		vkDestroySemaphore(device->device, frame.imageAcquiredSemaphore, nullptr);
 		VkSemaphoreCreateInfo semaphore_create_info = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
 		res = vkCreateSemaphore(device->device, &semaphore_create_info, NULL, &frame.imageAcquiredSemaphore);
@@ -2213,8 +2228,6 @@ void MGVK_RecreateSwapChain(MGG_GraphicsDevice* device)
 		device->depthFormat,
 		device->multiSampleCount,
 		device->syncInterval);
-
-    MGG_GraphicsDevice_SetRenderTargets(device, nullptr, nullptr, 0);
 }
 
 void MGG_GraphicsDevice_ResizeSwapchain(
@@ -2233,17 +2246,20 @@ void MGG_GraphicsDevice_ResizeSwapchain(
 	if (multiSampleCount == 0)
 		multiSampleCount = 1;
 
-	// Swapchain resize should not happen manually in Vulkan, we should leave this work to
-	// vkQueuePresentKHR() and vkAcquireNextImageKHR() which will react to surface changes.
-	// We should only let this through if the swapchain needs to be created or if syncInterval has changed.
-	if (device->swapchain != VK_NULL_HANDLE &&
-		device->syncInterval == syncInterval &&
-		device->multiSampleCount == multiSampleCount)
-		return;
-
 	auto vkColor = ToVkFormat(color);
 	auto vkDepth = ToVkFormat(depth);
-	
+
+	// Explicit presentation changes must take effect before the next draw.
+	if (device->swapchain != VK_NULL_HANDLE &&
+		device->window == nativeWindowHandle &&
+		device->swapchainWidth == width && device->swapchainHeight == height &&
+		device->colorFormat == vkColor && device->depthFormat == vkDepth &&
+		device->syncInterval == syncInterval &&
+		device->multiSampleCount == multiSampleCount)
+	{
+		return;
+	}
+
 	MGVK_RecreateSwapChain(device, nativeWindowHandle, width, height, vkColor, vkDepth, multiSampleCount, syncInterval);
 
 	MGVK_PrepareFrame(device);
@@ -2318,6 +2334,7 @@ void MGVK_TryAcquireSwap(MGG_GraphicsDevice* device, MGVK_Frame& frame)
 		res = vkAcquireNextImageKHR(device->device, device->swapchain, UINT64_MAX,
 			frame.imageAcquiredSemaphore, VK_NULL_HANDLE, &frame.image_index);
 		VK_CHECK_RESULT(res);
+		frame.imageAcquiredPending = true;
 	}
 
 	// This should be cleared by now.
@@ -2354,6 +2371,9 @@ void MGVK_PrepareFrame(MGG_GraphicsDevice* device)
 	//device->dynamicOffsets[1] = 0;
 
 	frame.is_recording = true;
+
+	// Bind only after acquisition, including after the old swapchain targets were destroyed.
+	MGG_GraphicsDevice_SetRenderTargets(device, nullptr, nullptr, 0);
 }
 
 mgint MGG_GraphicsDevice_BeginFrame(MGG_GraphicsDevice* device)
@@ -2686,11 +2706,11 @@ void MGG_GraphicsDevice_Present(MGG_GraphicsDevice* device, mgint currentFrame, 
 		frame.is_recording = false;
 
 		VkSemaphore waits[] = { frame.imageAcquiredSemaphore };
-		VkPipelineStageFlags waitFlags[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+		VkPipelineStageFlags waitFlags[] = { VK_PIPELINE_STAGE_ALL_COMMANDS_BIT };
 
 		VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
 		submitInfo.pNext = nullptr;
-		submitInfo.waitSemaphoreCount = 1;
+		submitInfo.waitSemaphoreCount = frame.imageAcquiredPending ? 1 : 0;
 		submitInfo.pWaitSemaphores = waits;
 		submitInfo.pWaitDstStageMask = waitFlags;
 		submitInfo.commandBufferCount = 1;
@@ -2698,6 +2718,8 @@ void MGG_GraphicsDevice_Present(MGG_GraphicsDevice* device, mgint currentFrame, 
 		submitInfo.signalSemaphoreCount = 1;
 		submitInfo.pSignalSemaphores = &swap.renderCompleteSemaphore;
 		res = vkQueueSubmit(device->queue, 1, &submitInfo, frame.completedFence);
+		VK_CHECK_RESULT(res);
+		frame.imageAcquiredPending = false;
 
 		VkPresentInfoKHR presentInfo = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
 		presentInfo.waitSemaphoreCount = 1;
@@ -2707,6 +2729,10 @@ void MGG_GraphicsDevice_Present(MGG_GraphicsDevice* device, mgint currentFrame, 
 		presentInfo.pImageIndices = &frame.image_index;
 		res = vkQueuePresentKHR(device->queue, &presentInfo);
 	}
+
+	// Recreation can replace the frame vector, so finish tracking this submission first.
+	frame.image_index = -1;
+	frame.is_rendering = true;
 
 	// Cleanup any finished transfers as they may be
 	// done after the block waiting for the present.
@@ -2733,9 +2759,6 @@ void MGG_GraphicsDevice_Present(MGG_GraphicsDevice* device, mgint currentFrame, 
 	{
 		VK_CHECK_RESULT(res);
 	}
-
-	frame.image_index = -1;
-	frame.is_rendering = true;
 
 	// Move the pending buffers to the free list 
 	// for reuse on the next frame.
@@ -3463,9 +3486,16 @@ static void MGVK_UpdateRenderPass(MGG_GraphicsDevice* device, FrameCounter curre
 	// Set the cache for the changed pipeline state.
 	device->pipelineState.targets = cached;
 
-	// Set default viewport and scissor.
-	MGG_GraphicsDevice_SetViewport(device, 0, 0, cached->width, cached->height, 0, 1);
-	MGG_GraphicsDevice_SetScissorRectangle(device, 0, 0, cached->width, cached->height);
+	// A readback ends the pass, but preserves the current target and dynamic state.
+	if (device->renderTargetDirty)
+	{
+		MGG_GraphicsDevice_SetViewport(device, 0, 0, cached->width, cached->height, 0, 1);
+		MGG_GraphicsDevice_SetScissorRectangle(device, 0, 0, cached->width, cached->height);
+	}
+	else
+	{
+		vkCmdSetViewport(commandBuffer, 0, 1, &device->viewport);
+	}
 
 	// Setup the render pass and pipeline.
 	VkRect2D render_area;
@@ -4358,34 +4388,11 @@ void MGG_GraphicsDevice_GetBackBufferData(MGG_GraphicsDevice* device, mgint x, m
 	auto& frame = device->frames[device->frameIndex];
 	assert(frame.is_recording);
 
-	MGVK_EndRenderPass(device, frame.commandBuffer);
+	MGVK_FlushCommands(device, frame);
 
-	VK_CHECK_RESULT(vkEndCommandBuffer(frame.commandBuffer));
-
-	VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
-
-	VkSubmitInfo flushSubmitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-	flushSubmitInfo.waitSemaphoreCount = 1;
-	flushSubmitInfo.pWaitSemaphores = &frame.imageAcquiredSemaphore;
-	flushSubmitInfo.commandBufferCount = 1;
-	flushSubmitInfo.pCommandBuffers = &frame.commandBuffer;
-	flushSubmitInfo.pWaitDstStageMask = waitStages;
-	flushSubmitInfo.signalSemaphoreCount = 1;
-	flushSubmitInfo.pSignalSemaphores = &device->swapchains[frame.image_index].renderCompleteSemaphore;
-
-	VkFence flushFence;
-	VkFenceCreateInfo fenceInfo = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-	vkCreateFence(device->device, &fenceInfo, nullptr, &flushFence);
-	VK_SET_OBJECT_NAME(device->device, flushFence, VK_OBJECT_TYPE_FENCE, "MGG_GraphicsDevice_GetBackBufferData::flushFence");
-
-	{
-		std::lock_guard lock(device->queueMutex);
-		vkQueueSubmit(device->queue, 1, &flushSubmitInfo, flushFence);
-	}
-	vkWaitForFences(device->device, 1, &flushFence, VK_TRUE, UINT64_MAX);
-	vkDestroyFence(device->device, flushFence, nullptr);
-
-	auto srcImage = device->swapchains[frame.image_index].texture->image;
+	auto sourceTexture = device->swapchains[frame.image_index].texture;
+	auto srcImage = sourceTexture->image;
+	auto sourceLayout = sourceTexture->layouts[0];
 
 	MGG_Texture* tempRgbaTexture = MGG_Texture_Create(
 		device,
@@ -4419,7 +4426,7 @@ void MGG_GraphicsDevice_GetBackBufferData(MGG_GraphicsDevice* device, mgint x, m
 
 	VkCommandBuffer copyCmdBuffer = MGVK_BeginNewCommandBuffer(device);
 	{
-		MGVK_CmdTransitionImageLayout(copyCmdBuffer, srcImage, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+		MGVK_CmdTransitionImageLayout(copyCmdBuffer, srcImage, sourceLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
 		MGVK_CmdTransitionImageLayout(copyCmdBuffer, tempRgbaTexture->image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
 
 		VkImageBlit imageBlitRegion = {};
@@ -4434,7 +4441,7 @@ void MGG_GraphicsDevice_GetBackBufferData(MGG_GraphicsDevice* device, mgint x, m
 		vkCmdBlitImage(copyCmdBuffer, srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, tempRgbaTexture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &imageBlitRegion, VK_FILTER_NEAREST);
 
 		MGVK_CmdTransitionImageLayout(copyCmdBuffer, tempRgbaTexture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-		MGVK_CmdTransitionImageLayout(copyCmdBuffer, srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_ASPECT_COLOR_BIT);
+		MGVK_CmdTransitionImageLayout(copyCmdBuffer, srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sourceLayout, VK_IMAGE_ASPECT_COLOR_BIT);
 
 		VkBufferImageCopy copyRegion = {};
 		copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -4446,7 +4453,7 @@ void MGG_GraphicsDevice_GetBackBufferData(MGG_GraphicsDevice* device, mgint x, m
 
     MGVK_ExecuteAndFreeCommandBuffer(device, copyCmdBuffer);
 
-	vmaInvalidateAllocation(device->allocator, dstBufferAllocation, 0, VK_WHOLE_SIZE);
+	VK_CHECK_RESULT(vmaInvalidateAllocation(device->allocator, dstBufferAllocation, 0, VK_WHOLE_SIZE));
 	assert(dstAllocInfo.pMappedData != nullptr);
 
 	size_t bytesToCopy = (size_t)count * dataBytes;
@@ -4460,10 +4467,11 @@ void MGG_GraphicsDevice_GetBackBufferData(MGG_GraphicsDevice* device, mgint x, m
 	vmaDestroyBuffer(device->allocator, dstBuffer, dstBufferAllocation);
 	vkDestroyImageView(device->device, tempRgbaTexture->view, nullptr);
 	vmaDestroyImage(device->allocator, tempRgbaTexture->image, tempRgbaTexture->allocation);
+	mg_remove(device->all_textures, tempRgbaTexture);
 	delete tempRgbaTexture;
 
 	MGVK_BeginCommandBuffer(frame.commandBuffer);
-	device->renderTargetDirty = true;
+	frame.is_recording = true;
 }
 
 static VkBlendFactor ToVkBlendFactor(MGBlend mode)
@@ -5600,7 +5608,7 @@ void MGG_Texture_GetData(MGG_GraphicsDevice* device, MGG_Texture* texture, mgint
 
 	if (texture->isTarget)
 	{
-		if (frame.is_recording && texture->frame == device->frame)
+		if (frame.is_recording && texture->writeFrame == device->frame)
 		{
 			MGVK_FlushCommands(device, frame);
 			restart_frame = true;
@@ -5628,7 +5636,10 @@ void MGG_Texture_GetData(MGG_GraphicsDevice* device, MGG_Texture* texture, mgint
 	vmaDestroyBuffer(device->allocator, buffer.buffer, buffer.allocation);
 
 	if (restart_frame)
+	{
 		MGVK_BeginCommandBuffer(frame.commandBuffer);
+		frame.is_recording = true;
+	}
 }
 
 MGG_InputLayout* MGG_InputLayout_Create(
@@ -5952,26 +5963,9 @@ void MGG_OcclusionQuery_End(MGG_GraphicsDevice* device, MGG_OcclusionQuery* quer
     }
     query->inBeginEndBlock = false;
 
-    MGVK_EndRenderPass(device, frame.commandBuffer);
-    VK_CHECK_RESULT(vkEndCommandBuffer(frame.commandBuffer));
-
-    VkFence fence;
-    VkFenceCreateInfo fenceInfo = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-    VK_CHECK_RESULT(vkCreateFence(device->device, &fenceInfo, nullptr, &fence));
-    
-    VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &frame.commandBuffer;
-	{
-		std::lock_guard lock(device->queueMutex);
-		VK_CHECK_RESULT(vkQueueSubmit(device->queue, 1, &submitInfo, fence));
-	}
-
-    VK_CHECK_RESULT(vkWaitForFences(device->device, 1, &fence, VK_TRUE, UINT64_MAX));
-    vkDestroyFence(device->device, fence, nullptr);
-
+	MGVK_FlushCommands(device, frame);
 	MGVK_BeginCommandBuffer(frame.commandBuffer);
-    device->renderTargetDirty = true;
+	frame.is_recording = true;
 }
 
 mgbyte MGG_OcclusionQuery_GetResult(MGG_GraphicsDevice* device, MGG_OcclusionQuery* query, mgint& pixelCount)

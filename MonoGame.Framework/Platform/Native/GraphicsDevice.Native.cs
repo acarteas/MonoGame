@@ -53,6 +53,9 @@ public partial class GraphicsDevice
         PresentationParameters.MultiSampleCount =
                 GetClampedMultisampleCount(PresentationParameters.BackBufferFormat, PresentationParameters.MultiSampleCount);
 
+        // The surface must have its final size before Vulkan queries its extent.
+        NativeGameWindow.FromNativeHandle(PresentationParameters.DeviceWindowHandle)?.OnPresentationChanged(PresentationParameters);
+
         MGG.GraphicsDevice_ResizeSwapchain(
                 Handle,
                 PresentationParameters.DeviceWindowHandle,
@@ -85,6 +88,9 @@ public partial class GraphicsDevice
             var syncInterval = PresentationParameters.PresentationInterval.GetSyncInterval();
             MGG.GraphicsDevice_Present(Handle, _currentFrame, syncInterval);
         }
+
+        // Resize the window before querying the surface for the new back buffer.
+        NativeGameWindow.FromNativeHandle(PresentationParameters.DeviceWindowHandle)?.OnPresentationChanged(PresentationParameters);
 
         // Now resize the back buffer.
         MGG.GraphicsDevice_ResizeSwapchain(

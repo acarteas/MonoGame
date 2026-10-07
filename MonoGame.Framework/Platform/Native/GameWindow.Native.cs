@@ -31,6 +31,19 @@ internal class NativeGameWindow : GameWindow
         return null;
     }
 
+    internal static NativeGameWindow FromNativeHandle(nint handle)
+    {
+        foreach (var window in _windows.Values)
+        {
+            if (window.Handle == handle)
+            {
+                return window;
+            }
+        }
+
+        return null;
+    }
+
     public override unsafe bool AllowUserResizing
     {
         get
