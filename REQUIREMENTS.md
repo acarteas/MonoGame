@@ -58,6 +58,38 @@ If you are intending to build MonoGame from source, there are a few extra build 
 
 * (Macos / Linux) Wine (for shader compilation) which can be downloaded from [WineHQ](https://www.winehq.org/) - [See here for more details](https://docs.monogame.net/articles/getting_started/1_setting_up_your_os_for_development_macos.html?tabs=android#setup-wine-for-effect-compilation)
 
+### Linux native audio dependencies
+
+The bundled SDL2 build for the native Vulkan runtime requires both ALSA and
+PulseAudio development headers and libraries, plus `pkg-config`. For example:
+
+* Debian/Ubuntu: `sudo apt-get install pkg-config libasound2-dev libpulse-dev`
+* Fedora: `sudo dnf install pkgconf-pkg-config alsa-lib-devel pulseaudio-libs-devel`
+* openSUSE: `sudo zypper install pkg-config alsa-devel libpulse-devel`
+
+PipeWire support is optional; its PulseAudio compatibility server works with the
+required PulseAudio backend. Install PipeWire development dependencies before
+configuring SDL2 if you also want the native PipeWire driver.
+
+`Build Native Dependencies` explicitly enables ALSA and PulseAudio with dynamic
+loading, then checks SDL2's generated `SDL_config.h`. Configuration options being
+`ON` are insufficient: SDL2 can silently omit drivers when headers are missing.
+The build now stops before compiling SDL2 if either required driver is absent.
+The generated Linux native makefile also runs the check before building the
+runtime. Windows and macOS builds are unaffected.
+
+After installing dependencies, rerun `./build.sh --target="Build Native Dependencies"`
+from the MonoGame root to regenerate and build bundled SDL2 and FAudio. To inspect
+an existing SDL2 configuration independently, run:
+
+```sh
+cmake -DSDL_BUILD_DIR=native/monogame/external/sdl2/sdl/build \
+  -P native/monogame/ValidateLinuxSdlAudio.cmake
+```
+
+This checks build capabilities without opening a device or requiring a running
+audio server. It does not guarantee that an output device is available at runtime.
+
 ## Using the Binaries releases
 
 ==============================

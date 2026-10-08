@@ -122,6 +122,7 @@ function faudio()
     
     filter {"system:linux"}
     linkoptions {"external/faudio/build/libFAudio.a"}
+    prebuildcommands {"cmake -DSDL_BUILD_DIR=external/sdl2/sdl/build -P ValidateLinuxSdlAudio.cmake"}
     filter {}
 end
 

@@ -46,6 +46,14 @@ public sealed class BuildNativeDependenciesTask : FrostingTask<BuildContext>
 
         RunCMake(context, configureArgs, "SDL2 CMake configuration failed!");
 
+        if (context.Environment.Platform.Family == PlatformFamily.Linux)
+        {
+            var validationArgs = new ProcessArgumentBuilder()
+                .AppendQuoted("-DSDL_BUILD_DIR=" + context.MakeAbsolute(new DirectoryPath(sdlBuildDir)).FullPath)
+                .Append("-P").AppendQuoted(context.MakeAbsolute(new FilePath("native/monogame/ValidateLinuxSdlAudio.cmake")).FullPath);
+            RunCMake(context, validationArgs, "SDL2 is missing required Linux audio backends; see the CMake error and REQUIREMENTS.md.");
+        }
+
         RunCMakeBuild(context, sdlBuildDir, "Release", "SDL2 build failed!");
     }
 
@@ -94,6 +102,14 @@ public sealed class BuildNativeDependenciesTask : FrostingTask<BuildContext>
 
             case PlatformFamily.Linux:
                 args.Append("-DCMAKE_POSITION_INDEPENDENT_CODE=ON");
+                if (isSDL)
+                {
+                    args.Append("-DSDL_AUDIO=ON")
+                        .Append("-DSDL_ALSA=ON")
+                        .Append("-DSDL_ALSA_SHARED=ON")
+                        .Append("-DSDL_PULSEAUDIO=ON")
+                        .Append("-DSDL_PULSEAUDIO_SHARED=ON");
+                }
                 break;
 
             case PlatformFamily.OSX:
