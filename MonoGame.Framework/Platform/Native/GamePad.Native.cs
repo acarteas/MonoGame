@@ -16,6 +16,52 @@ static partial class GamePad
 
     static internal unsafe MGP_Platform* Handle;
 
+    private static object _nativePlatformOwner;
+    private static unsafe MGP_Platform* _nativePlatformHandle;
+
+    internal static void EnsureNativePlatformAvailable()
+    {
+        if (_nativePlatformOwner != null)
+        {
+            throw new InvalidOperationException("The previous Android Native input platform has not retired.");
+        }
+    }
+
+    internal static unsafe void BindNativePlatform(object owner, MGP_Platform* handle)
+    {
+        EnsureNativePlatformAvailable();
+        _nativePlatformOwner = owner;
+        _nativePlatformHandle = Handle = handle;
+    }
+
+    internal static unsafe bool OwnsNativePlatform(object owner, MGP_Platform* handle)
+        => handle != null && ReferenceEquals(_nativePlatformOwner, owner) && _nativePlatformHandle == handle;
+
+    internal static unsafe bool ClearNativePlatformInput(object owner, MGP_Platform* handle)
+    {
+        if (!OwnsNativePlatform(owner, handle))
+        {
+            return false;
+        }
+
+        _stateByIndex.Clear();
+        _stateById.Clear();
+        Handle = null;
+        return true;
+    }
+
+    internal static unsafe bool CompleteNativePlatformRetirement(object owner, MGP_Platform* handle)
+    {
+        if (!OwnsNativePlatform(owner, handle))
+        {
+            return false;
+        }
+
+        _nativePlatformOwner = null;
+        _nativePlatformHandle = null;
+        return true;
+    }
+
     class State
     {
         public int Identifier;

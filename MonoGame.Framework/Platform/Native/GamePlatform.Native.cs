@@ -5,10 +5,12 @@
 using System;
 using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
+using Microsoft.Xna.Framework.Input.Touch;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using MonoGame.Interop;
 using System.Threading;
+using MonoGame.Framework.Utilities;
 
 namespace Microsoft.Xna.Framework;
 
@@ -29,8 +31,15 @@ class NativeGamePlatform : GamePlatform
 
     private int _isExiting;
 
+    private readonly bool _isAndroid = PlatformInfo.MonoGamePlatform == MonoGamePlatform.Android;
+
     public unsafe NativeGamePlatform(Game game) : base(game)
     {
+        if (_isAndroid)
+        {
+            GamePad.EnsureNativePlatformAvailable();
+        }
+
         GameRunBehavior behavior;
         Handle = MGP.Platform_Create(out behavior);
         if (Handle == null)
@@ -38,16 +47,46 @@ class NativeGamePlatform : GamePlatform
             throw new NoSuitableGraphicsDeviceException("Failed to initialize SDL platform!");
         }
 
-        DefaultRunBehavior = behavior;
+        try
+        {
+            if (_isAndroid)
+            {
+                GamePad.BindNativePlatform(this, Handle);
+            }
 
-        _window = new NativeGameWindow(this, true);
+            DefaultRunBehavior = behavior;
 
-        Window = _window;
+            _window = new NativeGameWindow(this, true);
 
-        Mouse.WindowHandle = _window.Handle;
-        MessageBox._window = _window._handle;
-        GamePad.Handle = Handle;
-        OnIsMouseVisibleChanged();
+            Window = _window;
+
+            Mouse.WindowHandle = _window.Handle;
+            MessageBox._window = _window._handle;
+            if (!_isAndroid)
+            {
+                GamePad.Handle = Handle;
+            }
+
+            OnIsMouseVisibleChanged();
+        }
+        catch
+        {
+            if (_isAndroid)
+            {
+                try
+                {
+                    Dispose(true);
+                }
+                catch
+                {
+
+                    // Preserve the constructor exception. Failed retirement keeps
+                    // its input owner reserved and its native handles unusable.
+                }
+            }
+
+            throw;
+        }
     }
 
     internal static unsafe MGG_GraphicsSystem* GraphicsSystem
@@ -344,6 +383,35 @@ class NativeGamePlatform : GamePlatform
 
     protected unsafe override void Dispose(bool disposing)
     {
+        if (_isAndroid)
+        {
+            if (IsDisposed || !GamePad.OwnsNativePlatform(this, Handle))
+            {
+                return;
+            }
+
+            GamePad.ClearNativePlatformInput(this, Handle);
+            Keyboard.Keys.Clear();
+            if (_window != null)
+            {
+                _window.MouseState = default;
+                if (ReferenceEquals(Mouse.PrimaryWindow, _window))
+                {
+                    Mouse.PrimaryWindow = null;
+                }
+
+                if (ReferenceEquals(TouchPanel.PrimaryWindow, _window))
+                {
+                    TouchPanel.PrimaryWindow = null;
+                }
+
+                if (MessageBox._window == _window._handle)
+                {
+                    MessageBox._window = null;
+                }
+            }
+        }
+
         if (_window != null)
         {
             _window.Destroy();
@@ -359,8 +427,13 @@ class NativeGamePlatform : GamePlatform
 
         if (Handle != null)
         {
+            var retiredHandle = Handle;
             MGP.Platform_Destroy(Handle);
             Handle = null;
+            if (_isAndroid)
+            {
+                GamePad.CompleteNativePlatformRetirement(this, retiredHandle);
+            }
         }
 
         base.Dispose(disposing);

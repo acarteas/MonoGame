@@ -75,6 +75,15 @@ returning. After the managed callback has run and disposed the game, the native
 completed. This retires the old event queue/subsystems; a later activity gets a
 fresh SDL initialization without discarding that new session's cancellation.
 
+Android Native input belongs to the managed platform instance as well as its
+native handle. Disposal clears controller state/capabilities, pressed keyboard
+state, and matching mouse/touch/messagebox window references before freeing the
+native platform. The next session can reuse controller IDs and native addresses.
+An incomplete native teardown keeps the old owner reserved and blocks replacement;
+a stale managed owner cannot clear a replacement's input or graphics system.
+Desktop Native input behavior is unchanged. Custom/static mouse cursor lifetime
+across SDL shutdown is outside this host's current session-reuse coverage.
+
 Destruction signals/cancels first and joins the SDL thread outside host locks,
 then clears its matching Java thread field before SDLActivity performs JNI
 teardown. This prevents Java from injecting a redundant quit during SDL cleanup.
@@ -117,6 +126,15 @@ flock --close /tmp/loadedandlocked-keybindings-dotnet-v2.lock \
 
 These tests do not replace Android JNI, Java peer-cache or rendering execution
 proof on a device/emulator.
+
+The actual compiled Native framework's Android input retirement tests use a small
+native ABI shim. They cover repeated controller IDs and native addresses, stale
+owners, teardown failure quarantine, constructor rollback and desktop behavior.
+All generated files go into the required external output directory:
+
+```sh
+python3 Tests.NativeInputContracts/run-tests.py --output /absolute/external/native-input-tests
+```
 
 Native host tests compile the production entrypoint and a fresh static build of
 the pinned SDL event queue (with device subsystems disabled) into the caller's
