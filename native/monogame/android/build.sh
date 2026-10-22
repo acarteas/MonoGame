@@ -390,7 +390,7 @@ manifest = {
                 "faudio": source(script.parent / "external/faudio")},
     "buildInputs": {name: {"path": str(script / name), "sha256": digest(script / name)}
                     for name in ("CMakeLists.txt", "build.sh", "toolchain.json", "generate-shaders.sh",
-                                 "validate-output-paths.py", "verify-runtime.py")},
+                                 "validate-output-paths.py", "verify-runtime.py", "verify-artifacts.py")},
     "libraries": libraries,
     "cxxSharedSource": {"path": str(pathlib.Path(runtime_path).resolve()), "sha256": digest(runtime_path)},
     "cmakeCache": {"path": str(build / "CMakeCache.txt"), "sha256": digest(build / "CMakeCache.txt")},

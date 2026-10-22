@@ -3,6 +3,7 @@
   "ndkRevision": "30.0.16248370",
   "minApi": 24,
   "compileSdk": 36,
+  "buildToolsVersion": "36.0.0",
   "abis": [
     "x86_64",
     "arm64-v8a"
