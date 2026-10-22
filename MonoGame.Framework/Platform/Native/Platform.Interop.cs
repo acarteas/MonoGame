@@ -317,6 +317,9 @@ internal static unsafe partial class MGP
     [DllImport(MonoGameNativeDLL, EntryPoint = "MGP_Window_SetPosition", ExactSpelling = true)]
     public static extern void Window_SetPosition(MGP_Window* window, int x, int y);
 
+    [DllImport(MonoGameNativeDLL, EntryPoint = "MGP_Window_GetClientSize", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)]
+    public static extern void Window_GetClientSize(MGP_Window* window, out int width, out int height);
+
     [DllImport(MonoGameNativeDLL, EntryPoint = "MGP_Window_SetClientSize", ExactSpelling = true)]
     public static extern void Window_SetClientSize(MGP_Window* window, int width, int height);
 

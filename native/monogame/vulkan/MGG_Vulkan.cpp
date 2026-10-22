@@ -1862,12 +1862,14 @@ void MGVK_RecreateSwapChain(
 		device->window = sdl_window;
 	}
 
+#if !defined(__ANDROID__)
 	// On resize the swapchain is placed under the title bar
 	// and not in the client area for some reason.  This fixes it.
 	int wx, wy;
 	SDL_GetWindowPosition(device->window, &wx, &wy);
 	SDL_SetWindowPosition(device->window, wx+1, wy);
 	SDL_SetWindowPosition(device->window, wx, wy);
+#endif
 
 #else
 #error Not Implemented

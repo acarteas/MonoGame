@@ -8,6 +8,10 @@
 
 #include <SDL.h>
 
+#if defined(__ANDROID__) && defined(MG_VULKAN)
+#include <SDL_vulkan.h>
+#endif
+
 #if _WIN32
 #include <combaseapi.h>
 #endif
@@ -274,7 +278,9 @@ void MGP_Platform_BeforeInitialize(MGP_Platform* platform)
 
 MGMonoGamePlatform MGP_Platform_GetPlatform()
 {
-#if MG_VULKAN
+#if defined(__ANDROID__)
+    return MGMonoGamePlatform::Android;
+#elif MG_VULKAN
     return MGMonoGamePlatform::DesktopVK;
 #elif MG_DIRECTX12
     return MGMonoGamePlatform::WindowsDX12;
@@ -637,6 +643,12 @@ mgbyte MGP_Platform_PollEvent(MGP_Platform* platform, MGP_Event& event_)
                 event_.Type = MGEventType::WindowResized;
                 event_.Window.Data1 = ev.window.data1;
                 event_.Window.Data2 = ev.window.data2;
+#if defined(__ANDROID__)
+                if (event_.Window.Window != nullptr)
+                {
+                    MGP_Window_GetClientSize(static_cast<MGP_Window*>(event_.Window.Window), event_.Window.Data1, event_.Window.Data2);
+                }
+#endif
                 return true;
                 break;
             case SDL_WINDOWEVENT_FOCUS_GAINED:
@@ -750,6 +762,12 @@ MGP_Window* MGP_Window_Create(
 		return nullptr;
 	}
 
+#if defined(__ANDROID__)
+
+    // Android owns the window size; requested desktop defaults are only creation hints.
+    MGP_Window_GetClientSize(window, width, height);
+#endif
+
     window->windowId = SDL_GetWindowID(window->window);
 
 	platform->windows.push_back(window);
@@ -773,10 +791,12 @@ void MGP_Window_SetIconBitmap(MGP_Window* window, mgbyte* icon, mgint length)
 {
     assert(window != nullptr);
 
+#if !defined(__ANDROID__)
     auto src = SDL_RWFromConstMem(icon, length);
     auto surface = SDL_LoadBMP_RW(src, 1);
 
     SDL_SetWindowIcon(window->window, surface);
+#endif
 }
 
 void* MGP_Window_GetNativeHandle(MGP_Window* window)
@@ -791,12 +811,16 @@ mgbyte MGP_Window_GetAllowUserResizing(MGP_Window* window)
 	assert(window != nullptr);
 	assert(window->window != nullptr);
 
+#if defined(__ANDROID__)
+    return false;
+#else
 	auto flags = SDL_GetWindowFlags(window->window);
 
 	if ((flags & SDL_WINDOW_RESIZABLE) != 0)
 		return true;
 
 	return false;
+#endif
 }
 
 void MGP_Window_SetAllowUserResizing(MGP_Window* window, mgbyte allow)
@@ -804,34 +828,44 @@ void MGP_Window_SetAllowUserResizing(MGP_Window* window, mgbyte allow)
 	assert(window != nullptr);
 	assert(window->window != nullptr);
 
+#if !defined(__ANDROID__)
 	SDL_SetWindowResizable(window->window, allow ? SDL_TRUE : SDL_FALSE);
+#endif
 }
 
 mgbyte MGP_Window_GetIsBorderless(MGP_Window* window)
 {
 	assert(window != nullptr);
 
+#if defined(__ANDROID__)
+    return true;
+#else
 	auto flags = SDL_GetWindowFlags(window->window);
 
 	if ((flags & SDL_WINDOW_BORDERLESS) != 0)
 		return true;
 
 	return false;
+#endif
 }
 
 void MGP_Window_SetIsBorderless(MGP_Window* window, mgbyte borderless)
 {
 	assert(window != nullptr);
 
+#if !defined(__ANDROID__)
 	SDL_SetWindowBordered(window->window, borderless ? SDL_FALSE : SDL_TRUE);
+#endif
 }
 
 void MGP_Window_SetTitle(MGP_Window* window, const char* title)
 {
     assert(window != nullptr);
 
+#if !defined(__ANDROID__)
     title = title ? title : "";
     SDL_SetWindowTitle(window->window, title);
+#endif
 }
 
 void MGP_Window_Show(MGP_Window* window, mgbyte show)
@@ -847,19 +881,39 @@ void MGP_Window_Show(MGP_Window* window, mgbyte show)
 void MGP_Window_GetPosition(MGP_Window* window, mgint& x, mgint& y)
 {
 	assert(window != nullptr);
+#if defined(__ANDROID__)
+    x = 0;
+    y = 0;
+#else
 	SDL_GetWindowPosition(window->window, &x, &y);
+#endif
 }
 
 void MGP_Window_SetPosition(MGP_Window* window, mgint x, mgint y)
 {
 	assert(window != nullptr);
+#if !defined(__ANDROID__)
 	SDL_SetWindowPosition(window->window, x, y);
+#endif
+}
+
+void MGP_Window_GetClientSize(MGP_Window* window, mgint& width, mgint& height)
+{
+    assert(window != nullptr);
+    assert(window->window != nullptr);
+
+#if defined(__ANDROID__) && defined(MG_VULKAN)
+    SDL_Vulkan_GetDrawableSize(window->window, &width, &height);
+#else
+    SDL_GetWindowSize(window->window, &width, &height);
+#endif
 }
 
 void MGP_Window_SetClientSize(MGP_Window* window, mgint width, mgint height)
 {
     assert(window != nullptr);
 
+#if !defined(__ANDROID__)
     // Resizing with SDL depends on the fullscreen mode.
     // If we're in exclusive-fullscreen, SDL_SetWindowDisplayMode()
     // is needed to be called with the closest requested size.
@@ -883,6 +937,7 @@ void MGP_Window_SetClientSize(MGP_Window* window, mgint width, mgint height)
     }
     else
         SDL_SetWindowSize(window->window, width, height);
+#endif
 }
 
 void MGP_Window_SetCursor(MGP_Window* window, MGP_Cursor* cursor)
@@ -960,7 +1015,9 @@ void MGP_Mouse_SetVisible(MGP_Platform* platform, mgbyte visible)
 void MGP_Mouse_WarpPosition(MGP_Window* window, mgint x, mgint y)
 {
     assert(window != nullptr);
+#if !defined(__ANDROID__)
     SDL_WarpMouseInWindow(window->window, x, y);
+#endif
 }
 
 MGP_Cursor* MGP_Cursor_Create(MGSystemCursor cursor_)
