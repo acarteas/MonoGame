@@ -17,7 +17,8 @@ public partial class GraphicsDevice
     internal unsafe MGG_GraphicsDevice* Handle;
 
     // Call on the graphics thread, serialized with device use and disposal.
-    // The native query additionally guards the complete query against teardown.
+    // This includes resource creation and deferred retirement during live-target enumeration.
+    // The native guard covers device lifetime only; it does not make concurrent resource use safe.
     internal unsafe VulkanCapabilitySnapshot GetVulkanCapabilitySnapshot()
     {
         if (IsDisposed) { throw new ObjectDisposedException(nameof(GraphicsDevice)); }

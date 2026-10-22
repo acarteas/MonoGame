@@ -1,6 +1,7 @@
 // Included in the Vulkan implementation so diagnostics use exactly the same
 // format selection and device creation state as the renderer.
 #include <map>
+#include <set>
 
 namespace
 {
@@ -47,6 +48,74 @@ static std::string SnapshotArray(const std::vector<std::string>& values, bool st
     }
     return result + ']';
 }
+static std::string SnapshotImage(const MGG_Texture* texture)
+{
+    const auto& info = texture->info;
+    return SnapshotMap({{"resourceId", SnapshotNumber(texture->id)},
+        {"format", SnapshotNumber(info.format)},
+        {"extent", SnapshotMap({{"width", SnapshotNumber(info.extent.width)},
+            {"height", SnapshotNumber(info.extent.height)}, {"depth", SnapshotNumber(info.extent.depth)}})},
+        {"samples", SnapshotNumber(info.samples)}, {"arrayLayers", SnapshotNumber(info.arrayLayers)},
+        {"mipLevels", SnapshotNumber(info.mipLevels)}, {"usage", SnapshotNumber(info.usage)},
+        {"imageType", SnapshotNumber(info.imageType)}, {"tiling", SnapshotNumber(info.tiling)},
+        {"flags", SnapshotNumber(info.flags)}});
+}
+static std::string SnapshotOffscreenTargets(const MGG_GraphicsDevice* device)
+{
+
+    // Queued children can retire before their parent. Compare queued addresses
+    // without dereferencing, and reject the parent before inspecting any fields.
+    auto pending = device->destroyTextures;
+    std::set<const MGG_Texture*> queued;
+    while (!pending.empty())
+    {
+        queued.insert(pending.front());
+        pending.pop();
+    }
+    std::vector<const MGG_Texture*> targets;
+    for (const auto* texture : device->all_textures)
+    {
+        if (texture == nullptr || queued.count(texture) != 0)
+        {
+            continue;
+        }
+        if (texture->isTarget && !texture->isSwapchain && texture->image != VK_NULL_HANDLE)
+        {
+            targets.push_back(texture);
+        }
+    }
+    std::sort(targets.begin(), targets.end(), [](const auto* left, const auto* right)
+    {
+        return left->id < right->id;
+    });
+    std::vector<std::string> rows;
+    for (const auto* texture : targets)
+    {
+        const auto* depth = texture->depthTexture;
+        const bool depthQueued = depth != nullptr && queued.count(depth) != 0;
+        const bool depthLive = depth != nullptr && !depthQueued && depth->image != VK_NULL_HANDLE;
+        const bool msaaPresent = texture->msImage != VK_NULL_HANDLE;
+        rows.push_back(SnapshotMap({{"schemaVersion", "1"}, {"targetId", SnapshotNumber(texture->id)},
+            {"requested", SnapshotMap({{"nativeTextureType", SnapshotNumber((int)texture->type)},
+                {"nativeSurfaceFormat", SnapshotNumber((int)texture->format)},
+                {"nativeDepthFormat", SnapshotNumber((int)texture->depthFormat)},
+                {"nativeMultiSampleCount", SnapshotNumber(texture->multiSampleCount)},
+                {"nativeRenderTargetUsage", SnapshotNumber((int)texture->usage)}})},
+            {"color", SnapshotImage(texture)},
+            {"depth", depthLive ? SnapshotImage(depth) : "null"},
+            {"depthStatus", SnapshotString(depthLive ? "OBSERVED" : depthQueued ? "UNAVAILABLE_QUEUED" :
+                depth != nullptr ? "UNAVAILABLE_NO_IMAGE" : texture->depthFormat == MGDepthFormat::None ? "ABSENT_NOT_REQUESTED" : "UNAVAILABLE_MISSING")},
+            {"auxiliaryMsaa", SnapshotMap({{"present", SnapshotBool(msaaPresent)},
+                {"image", "null"}, {"status", SnapshotString(msaaPresent ?
+                    "UNOBSERVED_CREATE_INFO_NOT_RETAINED" : "ABSENT")}})}}));
+    }
+    return SnapshotArray(rows);
+}
+}
+
+#ifndef MGVK_SNAPSHOT_HELPERS_ONLY
+namespace
+{
 static bool SnapshotHas(const MGG_GraphicsDevice* device, const char* name)
 {
     const auto& extensions = device->snapshotAvailableExtensions;
@@ -257,8 +326,16 @@ static std::string MGVK_MakeSnapshot(MGG_GraphicsDevice* device)
         {"requestedNativeColorFormat", SnapshotNumber(device->colorFormat)},
         {"requestedNativeDepthFormat", SnapshotNumber(device->depthFormat)},
         {"backbuffers", SnapshotArray(backbuffers)},
+        {"offscreenObservation", SnapshotMap({{"schemaVersion", "1"},
+            {"source", SnapshotString("Retained successful VkImageCreateInfo scalars; live offscreen parents only; queued destruction excluded")},
+            {"ownership", SnapshotString("Caller serializes all device operations on owning graphics thread; device mutex guards lifetime only")},
+            {"requestedEnums", SnapshotString("Retained native creation arguments after managed validation; original managed inputs must be recorded by caller; actual image metadata is separate")},
+            {"pendingTextureDestructionCount", SnapshotNumber(device->destroyTextures.size())},
+            {"status", SnapshotString("OBSERVED_LIVE_SET; offscreenTargets [] means observed empty")},
+            {"renderingProof", "false"}})},
+        {"offscreenTargets", SnapshotOffscreenTargets(device)},
         {"representativeOffscreenResources", "null"},
-        {"representativeOffscreenStatus", SnapshotString("UNAVAILABLE: capability query does not allocate or observe study scene/shadow targets; imageQueries are support and selection predictions")}});
+        {"representativeOffscreenStatus", SnapshotString("UNAVAILABLE: generic offscreenTargets require consumer role mapping and do not establish representative rendering; imageQueries remain support and selection predictions")}});
 
     VkPhysicalDeviceMemoryProperties memory = {};
     vkGetPhysicalDeviceMemoryProperties(physical, &memory);
@@ -363,3 +440,5 @@ int32_t MGG_GraphicsDevice_QueryVulkanSnapshot(MGG_GraphicsDevice* device, uint3
         return -4;
     }
 }
+
+#endif
