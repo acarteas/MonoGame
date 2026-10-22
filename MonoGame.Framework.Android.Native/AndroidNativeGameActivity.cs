@@ -136,11 +136,7 @@ public abstract class AndroidNativeGameActivity : SDLActivity
             return;
         }
 
-        _session.RequestStop();
-        if (_sdlInitialized)
-        {
-            NativeSendQuit();
-        }
+        _session.RequestStop(_sdlInitialized ? NativeSendQuit : null);
     }
 
     protected override void OnDestroy()
@@ -152,9 +148,9 @@ public abstract class AndroidNativeGameActivity : SDLActivity
         }
 
         _destroying = true;
-        _session.RequestStop();
         Java.Lang.Thread gameThread = null;
         bool stopped = false;
+        bool teardownSucceeded = false;
         try
         {
             if (_sdlInitialized)
@@ -163,18 +159,27 @@ public abstract class AndroidNativeGameActivity : SDLActivity
                 MSurface?.HandlePause();
             }
 
+            _session.RequestStop(_sdlInitialized ? NativeSendQuit : null);
 
-            // SDL sends quit before joining. No host lock is held during the
-            // join, and the managed callback never waits for the Android UI.
-            base.OnDestroy();
+            // A quit signal cannot race the callback's inactive transition into
+            // native SDL_Quit. Join outside all host locks before Java nativeQuit
+            // destroys SDL's Android JNI state; base must not send another quit.
+            gameThread?.Join();
             stopped = gameThread == null || !gameThread.IsAlive;
+            if (stopped && MSDLThread?.Equals(gameThread) == true)
+            {
+                MSDLThread = null;
+            }
+
+            base.OnDestroy();
+            teardownSucceeded = true;
         }
         catch (Exception error)
         {
             _session.Fail("activity-shutdown-failed", error);
             try
             {
-                if (_sdlInitialized) { NativeSendQuit(); }
+                _session.RequestStop(_sdlInitialized ? NativeSendQuit : null);
             }
             catch (Exception quitError)
             {
@@ -186,14 +191,10 @@ public abstract class AndroidNativeGameActivity : SDLActivity
 
         try
         {
-            if (stopped && _session.Clear() == AndroidNativeRunSession.Ok)
-            {
-                Owners.Release(this);
-            }
-            else
+            if (!Owners.TryCompleteShutdown(this, stopped, teardownSucceeded, _session.Clear))
             {
                 _session.Fail("activity-shutdown-retained", new InvalidOperationException(
-                    "SDL thread/registration remains owned; callback roots retained and new sessions rejected."));
+                    "SDL thread, JNI teardown or registration remains owned; callback roots retained and new sessions rejected."));
             }
         }
         catch (Exception error)

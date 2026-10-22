@@ -40,6 +40,8 @@ internal sealed class AndroidNativeRunSession
     private GCHandle _root;
     private bool _registered;
     private bool _entered;
+    private bool _acceptingExitSignals;
+    private int _exitSignals;
 
     internal AndroidNativeRunSession(ulong id, IAndroidNativeHostApi api, Func<bool> admit,
         Action bindThread, Func<IAndroidNativeGame> create, Func<int> nativeThreadId,
@@ -116,14 +118,72 @@ internal sealed class AndroidNativeRunSession
         }
     }
 
-    internal void RequestStop()
+    // Lease native signals without holding host locks across SDL/JNI. Callback
+    // completion closes admission and drains these calls before SDL_Quit starts.
+    internal void RequestStop(Action signalExit = null)
     {
+        bool signal;
         lock (_gate)
         {
             _state.CancellationRequested = true;
+            signal = _acceptingExitSignals && signalExit != null;
+            if (signal)
+            {
+                ++_exitSignals;
+            }
+        }
+
+        try
+        {
+            if (signal)
+            {
+                signalExit();
+            }
+        }
+        finally
+        {
+            if (signal)
+            {
+                lock (_gate)
+                {
+                    --_exitSignals;
+                    Monitor.PulseAll(_gate);
+                }
+            }
         }
 
         Publish("exit-requested");
+    }
+
+    internal bool IsExitSignalAdmissionOpen
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _acceptingExitSignals;
+            }
+        }
+    }
+
+    private void CloseExitSignals()
+    {
+        lock (_gate)
+        {
+            _acceptingExitSignals = false;
+            while (_exitSignals != 0)
+            {
+                try
+                {
+                    Monitor.Wait(_gate);
+                }
+                catch (ThreadInterruptedException)
+                {
+                    _state.Result = CallbackException;
+                    _state.Failure ??= "Callback interrupted while draining an SDL exit signal.";
+                }
+            }
+        }
     }
 
     // Call only after SDL shutdown/join. A BUSY/error result deliberately keeps
@@ -164,6 +224,7 @@ internal sealed class AndroidNativeRunSession
         {
             try
             {
+                CloseExitSignals();
                 lock (_gate)
                 {
                     _state.Result = CallbackException;
@@ -202,6 +263,7 @@ internal sealed class AndroidNativeRunSession
                 _entered = true;
                 entered = true;
                 _state.IsCallbackActive = true;
+                _acceptingExitSignals = true;
                 _state.GameThreadId = Environment.CurrentManagedThreadId;
                 _state.GameNativeThreadId = _nativeThreadId();
             }
@@ -246,6 +308,7 @@ internal sealed class AndroidNativeRunSession
                     Fail("game-dispose-failed", error);
                 }
 
+                CloseExitSignals();
                 lock (_gate)
                 {
                     _state.Result ??= Ok;

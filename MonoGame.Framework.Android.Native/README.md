@@ -67,10 +67,20 @@ Activity superclass lifecycle through nonvirtual JNI and finishes without
 resetting the live SDL singleton. Stale activity lifecycle calls follow the same
 Android superclass path.
 
-`RequestGameExit()` marks cancellation and sends SDL quit. Destruction sends quit
-before SDL joins its thread; the UI thread never calls Game.Run or Game.Dispose.
+`RequestGameExit()` marks cancellation and leases an SDL quit signal only while
+the callback accepts signals. SDL/JNI calls run outside host locks. Callback
+completion closes signal admission and drains any in-flight signal before
+returning. After the managed callback has run and disposed the game, the native
+`SDL_main` host calls `SDL_Quit` on that same game thread before it becomes
+completed. This retires the old event queue/subsystems; a later activity gets a
+fresh SDL initialization without discarding that new session's cancellation.
+
+Destruction signals/cancels first and joins the SDL thread outside host locks,
+then clears its matching Java thread field before SDLActivity performs JNI
+teardown. This prevents Java from injecting a redundant quit during SDL cleanup.
+The UI thread never calls Game.Run or Game.Dispose.
 The delegate and GCHandle remain rooted until native Clear succeeds after thread
-completion. A shutdown/clear failure retains ownership and roots, rejects another
+completion and successful Java teardown. A shutdown/clear failure retains ownership and roots, rejects another
 session and emits a failure checkpoint. SDL's synchronous native messagebox is
 suppressed with a diagnostic and result -1 because waiting for a UI dialog would
 deadlock SDL's destruction join.
@@ -107,3 +117,14 @@ flock --close /tmp/loadedandlocked-keybindings-dotnet-v2.lock \
 
 These tests do not replace Android JNI, Java peer-cache or rendering execution
 proof on a device/emulator.
+
+Native host tests compile the production entrypoint and a fresh static build of
+the pinned SDL event queue (with device subsystems disabled) into the caller's
+external build tree. They cover repeated sessions, late old quits, intact new
+cancellation, cleanup thread/order, active clear and callback failure cleanup:
+
+```sh
+cmake -S native/monogame/android/tests -B /absolute/external/android-host-tests -G Ninja
+cmake --build /absolute/external/android-host-tests
+ctest --test-dir /absolute/external/android-host-tests --output-on-failure
+```

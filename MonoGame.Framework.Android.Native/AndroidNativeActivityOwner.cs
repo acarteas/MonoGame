@@ -1,3 +1,5 @@
+using System;
+
 namespace Microsoft.Xna.Framework;
 
 // SDL's Java host stores process-wide singleton/surface/thread fields. Keep
@@ -44,5 +46,17 @@ internal sealed class AndroidNativeActivityOwner
             _owner = null;
             return true;
         }
+    }
+
+    internal bool TryCompleteShutdown(object owner, bool threadStopped, bool teardownSucceeded, Func<int> clear)
+    {
+        if (!threadStopped || !teardownSucceeded || !IsOwner(owner))
+        {
+            return false;
+        }
+
+        // Native clear runs outside the ownership lock and only after both the
+        // SDL thread and Java JNI teardown completed. A failure quarantines SDL.
+        return clear() == AndroidNativeRunSession.Ok && Release(owner);
     }
 }

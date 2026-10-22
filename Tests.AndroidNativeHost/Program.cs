@@ -5,12 +5,14 @@ var tests = new (string Name, Action Run)[]
 {
     ("normal completion disposes on SDL thread before native clear and root release", NormalCompletion),
     ("active clear preserves delegate and GCHandle until callback returns", ActiveClear),
+    ("SDL exit signal leases release host locks and drain before callback return", ExitSignalLease),
     ("destroy before entry cancels construction and stale callback", CancelBeforeEntry),
     ("exit during construction suppresses Run and disposes exactly once", CancelDuringCreation),
     ("Create/Run/Dispose exceptions become structured callback failure", FailurePaths),
     ("outer Cdecl boundary contains broken exception formatting and observers", BrokenDiagnostics),
     ("UI/wrong SDL admission never constructs a game", WrongThread),
     ("stale Activity release cannot steal the next monotonic session", StaleOwner),
+    ("failed JNI teardown quarantines owner and callback roots", FailedShutdown),
     ("registration version/status failures release unowned roots", RegistrationFailure),
     ("Native Threading binds and drains its real queue on game thread", NativeThreadBinding)
 };
@@ -96,6 +98,62 @@ static void ActiveClear()
     Check(worker.Join(TimeSpan.FromSeconds(5)), "completion timeout");
     Check(result == 0 && game.Disposals == 1, "active shutdown completion");
     Check(session.Clear() == 0 && !session.Snapshot.IsRegistrationRooted, "post-completion clear");
+}
+
+static void ExitSignalLease()
+{
+    var api = new FakeApi();
+    using var running = new ManualResetEventSlim();
+    using var finishRun = new ManualResetEventSlim();
+    using var signalEntered = new ManualResetEventSlim();
+    using var finishSignal = new ManualResetEventSlim();
+    using var callbackReturned = new ManualResetEventSlim();
+    var game = new FakeGame { RunAction = () => { running.Set(); Check(finishRun.Wait(TimeSpan.FromSeconds(5)), "run timeout"); } };
+    var session = Session(api, () => game);
+    session.Register();
+    int signals = 0;
+    session.RequestStop(() => ++signals);
+    Check(signals == 0, "pre-entry cancellation sent an SDL signal");
+
+    // Use a fresh session because the cancelled one correctly skips construction.
+    Check(session.Clear() == 0, "pre-entry signal check clear");
+    api = new FakeApi();
+    session = Session(api, () => game);
+    session.Register();
+    int result = int.MinValue;
+    var worker = new Thread(() => { result = api.Enter(); callbackReturned.Set(); });
+    worker.Start();
+    Check(running.Wait(TimeSpan.FromSeconds(5)), "callback did not start");
+    var stopper = new Thread(() => session.RequestStop(() =>
+    {
+        Interlocked.Increment(ref signals);
+        signalEntered.Set();
+        Check(finishSignal.Wait(TimeSpan.FromSeconds(5)), "signal timeout");
+    }));
+    stopper.Start();
+    Check(signalEntered.Wait(TimeSpan.FromSeconds(5)), "signal did not start");
+    try
+    {
+        var snapshot = Task.Run(() => session.Snapshot);
+        Check(snapshot.Wait(TimeSpan.FromSeconds(1)), "blocked SDL signal held the host state lock");
+        Check(snapshot.Result.CancellationRequested && session.Clear() == -4, "state access blocked or lost active roots");
+        finishRun.Set();
+        Check(SpinWait.SpinUntil(() => !session.IsExitSignalAdmissionOpen, TimeSpan.FromSeconds(1)), "completion did not close signal admission");
+        Check(!callbackReturned.IsSet && session.Snapshot.IsCallbackActive, "callback returned into SDL cleanup with signal in flight");
+        session.RequestStop(() => Interlocked.Increment(ref signals));
+        Check(signals == 1, "completion admitted another SDL quit");
+    }
+    finally
+    {
+        finishRun.Set();
+        finishSignal.Set();
+    }
+
+    Check(stopper.Join(TimeSpan.FromSeconds(5)) && worker.Join(TimeSpan.FromSeconds(5)), "lease drain/join timeout");
+    Check(result == 0 && game.Disposals == 1, "lease completion result/disposal");
+    session.RequestStop(() => ++signals);
+    Check(signals == 1, "post-completion Stop sent a late SDL quit");
+    Check(session.Clear() == 0, "lease completion root clear");
 }
 
 static void CancelBeforeEntry()
@@ -196,6 +254,23 @@ static void StaleOwner()
     Check(owners.TryAcquire(second, out ulong two) && two > one, "next monotonic session");
     Check(!owners.IsOwner(first) && !owners.Release(first) && owners.IsOwner(second), "stale lifecycle stole new owner");
     Check(owners.Release(second), "second release");
+}
+
+static void FailedShutdown()
+{
+    var owners = new AndroidNativeActivityOwner();
+    var first = new object();
+    var second = new object();
+    Check(owners.TryAcquire(first, out _), "shutdown owner acquire");
+    int clears = 0;
+    int Clear() { clears++; return 0; }
+    Check(!owners.TryCompleteShutdown(first, true, false, Clear), "failed JNI teardown released owner");
+    Check(!owners.TryCompleteShutdown(first, false, true, Clear), "live thread released owner");
+    Check(clears == 0 && !owners.TryAcquire(second, out _), "failed teardown cleared roots or admitted replacement");
+    Check(!owners.TryCompleteShutdown(second, true, true, Clear) && clears == 0, "stale lifecycle called native clear");
+    Check(!owners.TryCompleteShutdown(first, true, true, () => -4) && owners.IsOwner(first), "busy native clear released owner");
+    Check(owners.TryCompleteShutdown(first, true, true, Clear) && clears == 1, "complete teardown did not clear/release");
+    Check(owners.TryAcquire(second, out _), "next session blocked after complete teardown");
 }
 
 static void RegistrationFailure()

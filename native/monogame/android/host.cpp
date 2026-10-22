@@ -8,6 +8,7 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <SDL.h>
 
 namespace
 {
@@ -141,6 +142,19 @@ int MGP_ANDROID_CALL SDL_main(int argc, char** argv)
     {
         result = MGP_ANDROID_CALLBACK_EXCEPTION;
     }
+
+    // The callback has finished Game.Run and Game.Dispose on this SDL thread.
+    // Retire SDL's subsystems/event queue before Java's later nativeQuit destroys
+    // its Android JNI mutex/semaphores. No previous-session quit survives reuse.
+    try
+    {
+        SDL_Quit();
+    }
+    catch (...)
+    {
+        result = MGP_ANDROID_CALLBACK_EXCEPTION;
+    }
+
     {
         std::lock_guard<std::mutex> lock(hostMutex);
         state = RunState::Completed;

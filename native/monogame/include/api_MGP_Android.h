@@ -64,6 +64,9 @@ MG_EXPORT int32_t MGP_ANDROID_CALL MGP_Android_ClearRunCallback(uint64_t session
 // STALE_SESSION (or NOT_REGISTERED when no session has ever been registered).
 // Concurrent entry returns BUSY; repeated completed entry returns ALREADY_RUN.
 // The callback runs synchronously at most once, with no new thread or runtime.
+// After callback/disposal returns, SDL_main calls SDL_Quit on that same thread
+// before completing the registration; Clear stays BUSY throughout this cleanup.
+// Java may destroy Android JNI state only after joining this SDL game thread.
 // SDL_main returns its int32_t result unchanged, or CALLBACK_EXCEPTION for a
 // native C++ exception. Managed callbacks MUST catch managed exceptions and
 // return an error: no managed exception may cross this C ABI. Status values
