@@ -12,7 +12,8 @@ Usage: build.sh --build-root DIR [--sdk-root DIR] [--ndk-root DIR]
                 [--abi x86_64|arm64-v8a] [--configuration Debug|Release]
                 [--preflight-only]
 
-Runs the non-destructive Android toolchain preflight. The build root must be an
+Builds vendored shared SDL2 and static PIC FAudio for both ABIs by default.
+--preflight-only validates the tools without configuring or building. The root must be an
 existing directory owned and writable by the caller, outside the SDK, NDK,
 source checkout, and desktop dependency build roots. ANDROID_HOME is used when
 --sdk-root is omitted. ANDROID_NDK_ROOT is not implicitly selected.
@@ -273,3 +274,127 @@ print(json.dumps(payload, indent=2, sort_keys=True))
 PY
 mv -- "$tmp_json" "$preflight_json"
 trap - EXIT
+
+if "$preflight_only"; then
+    exit 0
+fi
+
+[[ -f "${ndk_root}/build/cmake/android.toolchain.cmake" ]] || fail "official NDK CMake toolchain is missing"
+selected_abis=("${ALLOWED_ABIS[@]}")
+[[ "$abi" == all ]] || selected_abis=("$abi")
+for selected_abi in "${selected_abis[@]}"; do
+    build_dir="${build_root}/build/${selected_abi}/${configuration}"
+    artifact_dir="${build_root}/artifacts/${selected_abi}/${configuration}"
+    # Descendant symlinks must not redirect writes into a protected worktree.
+    # Existing directories are reusable; no directories or caller files are deleted.
+    python3 - "$build_root" "$build_dir" "$artifact_dir" <<'PY'
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+for value in sys.argv[2:]:
+    path = pathlib.Path(value)
+    for candidate in [path, *path.parents]:
+        if candidate == root:
+            break
+        if candidate.is_symlink():
+            raise SystemExit(f"Refusing symlink in native output path: {candidate}")
+    path.mkdir(parents=True, exist_ok=True)
+    if path.resolve() != path:
+        raise SystemExit(f"Native output path changed during validation: {path}")
+build, artifacts = map(pathlib.Path, sys.argv[2:])
+for path in [build / "lib", artifacts / "libSDL2.so", artifacts / "libc++_shared.so",
+             artifacts / "build-manifest.json", build / "lib/libFAudio.a"]:
+    if path.is_symlink():
+        raise SystemExit(f"Refusing symlink in native output path: {path}")
+PY
+    cmake -S "$SCRIPT_DIR" -B "$build_dir" -G Ninja \
+        -DCMAKE_TOOLCHAIN_FILE="${ndk_root}/build/cmake/android.toolchain.cmake" \
+        -DANDROID_ABI="$selected_abi" -DANDROID_PLATFORM="android-${EXPECTED_API}" \
+        -DANDROID_STL=c++_shared -DCMAKE_BUILD_TYPE="$configuration" \
+        -DMONOGAME_ARTIFACT_DIR="$artifact_dir" \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.10
+    cmake --build "$build_dir" --target SDL2 FAudio-static
+
+    case "$selected_abi" in
+        x86_64) ndk_triple=x86_64-linux-android ;;
+        arm64-v8a) ndk_triple=aarch64-linux-android ;;
+    esac
+    cxx_runtime="${llvm_bin}/../sysroot/usr/lib/${ndk_triple}/libc++_shared.so"
+    [[ -f "$cxx_runtime" ]] || fail "NDK shared C++ runtime is missing: ${cxx_runtime}"
+    [[ ! -L "${artifact_dir}/libc++_shared.so" ]] || fail "shared C++ runtime output must not be a symlink"
+    cp -- "$cxx_runtime" "${artifact_dir}/libc++_shared.so"
+
+    python3 - "$preflight_json" "$build_dir" "$artifact_dir" "$selected_abi" "$llvm_bin" "$SCRIPT_DIR" "$cxx_runtime" <<'PY'
+import hashlib
+import json
+import pathlib
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+preflight_path, build_path, artifact_path, abi, llvm_path, script_path, runtime_path = sys.argv[1:]
+build = pathlib.Path(build_path)
+artifacts = pathlib.Path(artifact_path)
+script = pathlib.Path(script_path)
+preflight = json.loads(pathlib.Path(preflight_path).read_text())
+paths = json.loads((build / "dependency-paths.json").read_text())
+
+def command(*args):
+    return subprocess.check_output(args, text=True).strip()
+
+def digest(path):
+    return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+
+def source(repo):
+    # Include tracked file contents, not only HEAD: source overlays and recursive
+    # submodule files must change the fingerprint even before a commit is made.
+    names = subprocess.check_output(["git", "-C", str(repo), "ls-files", "--recurse-submodules", "-z"])
+    fingerprint = hashlib.sha256()
+    for name in sorted(names.split(b"\0")):
+        if not name:
+            continue
+        path = repo / name.decode()
+        fingerprint.update(name + b"\0")
+        fingerprint.update(path.read_bytes() if path.is_file() else b"<missing>")
+        fingerprint.update(b"\0")
+    return {"path": str(repo), "commit": command("git", "-C", str(repo), "rev-parse", "HEAD"),
+            "trackedContentSha256": fingerprint.hexdigest(),
+            "status": command("git", "-C", str(repo), "status", "--porcelain", "--untracked-files=no")}
+
+libraries = {}
+for name, path in {**paths, "cxxShared": str(artifacts / "libc++_shared.so")}.items():
+    libraries[name] = {"path": path, "sha256": digest(path), "bytes": pathlib.Path(path).stat().st_size}
+
+manifest = {
+    "schemaVersion": 1, "phase": "dependencies", "result": "ok",
+    "recordedUtc": datetime.now(timezone.utc).isoformat(),
+    "abi": abi, "configuration": preflight["resolved"]["configuration"],
+    "minApi": preflight["resolved"]["minApi"], "compileSdk": preflight["resolved"]["compileSdk"],
+    "ndkRevision": preflight["resolved"]["ndkRevision"], "stl": "c++_shared",
+    "buildDirectory": str(build), "artifactDirectory": str(artifacts),
+    "preflightEvidence": preflight_path, "resolved": preflight["resolved"],
+    "tools": {**preflight["tools"], "clang": command(str(pathlib.Path(llvm_path) / "clang"), "--version"),
+              "llvmAr": command(str(pathlib.Path(llvm_path) / "llvm-ar"), "--version")},
+    "sources": {"monoGame": source(script.parents[2]),
+                "sdl2Wrapper": source(script.parent / "external/sdl2"),
+                "sdl2": source(script.parent / "external/sdl2/sdl"),
+                "faudio": source(script.parent / "external/faudio")},
+    "buildInputs": {name: {"path": str(script / name), "sha256": digest(script / name)}
+                    for name in ("CMakeLists.txt", "build.sh", "toolchain.json")},
+    "libraries": libraries,
+    "cxxSharedSource": {"path": str(pathlib.Path(runtime_path).resolve()), "sha256": digest(runtime_path)},
+    "cmakeCache": {"path": str(build / "CMakeCache.txt"), "sha256": digest(build / "CMakeCache.txt")},
+    "compileCommands": {"path": str(build / "compile_commands.json"), "sha256": digest(build / "compile_commands.json")},
+}
+destination = artifacts / "build-manifest.json"
+if destination.is_symlink():
+    raise SystemExit(f"Refusing manifest symlink: {destination}")
+temporary = artifacts / ".build-manifest.json.tmp"
+with temporary.open("x", encoding="utf-8") as output:
+    json.dump(manifest, output, indent=2, sort_keys=True)
+    output.write("\n")
+temporary.replace(destination)
+print(f"Dependency build manifest: {destination}")
+PY
+done
