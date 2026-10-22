@@ -3,6 +3,11 @@
 // file 'LICENSE.txt', which is part of this source code package.
 
 #include "api_MGG.h"
+#include "api_vulkan_snapshot.h"
+#include <sstream>
+#include <iomanip>
+#include <locale>
+#include <set>
 #if defined(__ANDROID__)
 #include "../android/surface_lifecycle.h"
 #endif
@@ -287,6 +292,15 @@ struct MGG_GraphicsDevice
 	VkPhysicalDeviceFeatures deviceFeatures;
 	VkPhysicalDeviceMemoryProperties deviceMemoryProperties;
 	bool customBorderColorSupported = false;
+	VkPhysicalDeviceFeatures snapshotRequestedFeatures = {};
+	std::vector<std::string> snapshotAvailableExtensions, snapshotEnabledExtensions;
+	std::vector<std::string> snapshotAvailableInstanceExtensions, snapshotEnabledInstanceExtensions;
+	uint32_t snapshotAdapterIndex = 0;
+	uint32_t snapshotLoaderApiVersion = 0;
+	uint32_t snapshotRequestedApiVersion = 0;
+	bool snapshotProperties2EXT = false;
+	VkBool32 snapshotScalarRequested = 0, snapshotCustomRequested = 0, snapshotCustomWithoutFormatRequested = 0;
+	VkResult snapshotCreateResult = VK_NOT_READY;
 
 	VkDevice device = VK_NULL_HANDLE;
 
@@ -528,11 +542,17 @@ struct MGG_OcclusionQuery
 struct MGG_GraphicsSystem
 {
 	VkInstance instance;
+	uint32_t loaderApiVersion = 0;
+	uint32_t requestedApiVersion = 0;
+	std::vector<std::string> availableExtensions, enabledExtensions;
 	mgbool supportsPhysicalDeviceProperties2EXT;
 	VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
 	std::vector<MGG_GraphicsAdapter*> adapters;
 };
 
+
+static std::mutex MGVK_SnapshotMutex;
+static std::set<MGG_GraphicsDevice*> MGVK_SnapshotDevices;
 
 static void MGVK_BufferCopyAndFlush(MGG_GraphicsDevice* device, MGG_Buffer* buffer, int destOffset, mgbyte* data, int dataBytes);
 static MGG_Buffer* MGVK_Buffer_Create(MGG_GraphicsDevice* device, MGBufferType type, mgint sizeInBytes, bool no_push);
@@ -980,6 +1000,12 @@ MGG_GraphicsSystem* MGG_GraphicsSystem_Create()
 
 	auto system = new MGG_GraphicsSystem();
 	system->instance = instance;
+	system->loaderApiVersion = version;
+	system->requestedApiVersion = app_info.apiVersion;
+    for (const auto& ext : supportedInstanceExtensions) { system->availableExtensions.emplace_back(ext.extensionName); }
+    for (const auto* ext : instanceExtensions) { system->enabledExtensions.emplace_back(ext); }
+    std::sort(system->availableExtensions.begin(), system->availableExtensions.end());
+    std::sort(system->enabledExtensions.begin(), system->enabledExtensions.end());
 	system->supportsPhysicalDeviceProperties2EXT = supportsProperties2EXT;
 
 	// Gather the physical devices.
@@ -1186,6 +1212,8 @@ static VkFormat MGVK_PickSupportedDepthFormat(MGG_GraphicsDevice* device, VkForm
 	}
 	return VK_FORMAT_UNDEFINED;
 }
+
+#include "MGG_VulkanSnapshot.inl"
 
 static MGG_Texture* CreateDepthTexture(MGG_GraphicsDevice* device, VkFormat format, uint32_t width, uint32_t height, mgint multiSampleCount)
 {
@@ -1433,6 +1461,12 @@ MGG_GraphicsDevice* MGG_GraphicsDevice_Create(MGG_GraphicsSystem* system, MGG_Gr
 	device->physicalDevice = adapter->device;
 	device->deviceFeatures = adapter->features;
 	device->deviceProperties = adapter->properties;
+	device->snapshotProperties2EXT = system->supportsPhysicalDeviceProperties2EXT;
+	device->snapshotLoaderApiVersion = system->loaderApiVersion;
+	device->snapshotRequestedApiVersion = system->requestedApiVersion;
+	device->snapshotAvailableInstanceExtensions = system->availableExtensions;
+	device->snapshotEnabledInstanceExtensions = system->enabledExtensions;
+	device->snapshotAdapterIndex = (uint32_t)(std::find(system->adapters.begin(), system->adapters.end(), adapter) - system->adapters.begin());
 
 	printf("Selected GPU: %s\n", device->deviceProperties.deviceName);
 	printf("Supported Vulkan API version: %d.%d.%d\n", VK_API_VERSION_MAJOR(device->deviceProperties.apiVersion), VK_API_VERSION_MINOR(device->deviceProperties.apiVersion), VK_API_VERSION_PATCH(device->deviceProperties.apiVersion));
@@ -1581,7 +1615,16 @@ MGG_GraphicsDevice* MGG_GraphicsDevice_Create(MGG_GraphicsSystem* system, MGG_Gr
 	deviceCreateInfo.enabledExtensionCount = extensions.size();
 	deviceCreateInfo.ppEnabledExtensionNames = extensions.data();
 
+	device->snapshotRequestedFeatures = enabledFeatures;
+	device->snapshotScalarRequested = scalarFeatures.scalarBlockLayout;
+	device->snapshotCustomRequested = customBorderColorFeatures.customBorderColors;
+	device->snapshotCustomWithoutFormatRequested = customBorderColorFeatures.customBorderColorWithoutFormat;
+	for (const auto& ext : deviceExtensions) { device->snapshotAvailableExtensions.emplace_back(ext.extensionName); }
+	for (const auto* ext : extensions) { device->snapshotEnabledExtensions.emplace_back(ext); }
+	std::sort(device->snapshotAvailableExtensions.begin(), device->snapshotAvailableExtensions.end());
+	std::sort(device->snapshotEnabledExtensions.begin(), device->snapshotEnabledExtensions.end());
 	auto res = vkCreateDevice(device->physicalDevice, &deviceCreateInfo, NULL, &device->device);
+	device->snapshotCreateResult = res;
 	VK_CHECK_RESULT(res);
 	VK_SET_OBJECT_NAME(device->device, device->device, VK_OBJECT_TYPE_DEVICE, "MGG_GraphicsDevice.device");
 	VK_SET_OBJECT_NAME(device->device, device->physicalDevice, VK_OBJECT_TYPE_PHYSICAL_DEVICE, "MGG_GraphicsDevice.physicalDevice");
@@ -1663,6 +1706,7 @@ MGG_GraphicsDevice* MGG_GraphicsDevice_Create(MGG_GraphicsSystem* system, MGG_Gr
 		device->nullTexture[(int)MGTextureType::Cube] = tex;
 	}
 
+	{ std::lock_guard<std::mutex> lock(MGVK_SnapshotMutex); MGVK_SnapshotDevices.insert(device); }
 	return device;
 }
 
@@ -1765,6 +1809,8 @@ static void MGVK_CleanupSwapChain(MGG_GraphicsDevice* device)
 
 void MGG_GraphicsDevice_Destroy(MGG_GraphicsDevice* device)
 {
+	std::lock_guard<std::mutex> snapshotLock(MGVK_SnapshotMutex);
+	MGVK_SnapshotDevices.erase(device);
 	assert(device != nullptr);
 
 	// Be sure we're done drawing.

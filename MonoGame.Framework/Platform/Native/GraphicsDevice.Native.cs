@@ -16,6 +16,14 @@ public partial class GraphicsDevice
 {
     internal unsafe MGG_GraphicsDevice* Handle;
 
+    // Call on the graphics thread, serialized with device use and disposal.
+    // The native query additionally guards the complete query against teardown.
+    internal unsafe VulkanCapabilitySnapshot GetVulkanCapabilitySnapshot()
+    {
+        if (IsDisposed) { throw new ObjectDisposedException(nameof(GraphicsDevice)); }
+        return VulkanCapabilitySnapshot.Query(Handle);
+    }
+
     internal Texture2D DefaultTexture;
 
     private int _currentFrame = -1;
