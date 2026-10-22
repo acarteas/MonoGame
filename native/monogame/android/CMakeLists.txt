@@ -96,7 +96,7 @@ set(runtime_root "${CMAKE_CURRENT_SOURCE_DIR}/..")
 file(GLOB runtime_sources CONFIGURE_DEPENDS
     "${runtime_root}/common/*.cpp" "${runtime_root}/sdl/*.cpp"
     "${runtime_root}/vulkan/*.cpp" "${runtime_root}/faudio/*.cpp")
-add_library(mgruntime SHARED ${runtime_sources})
+add_library(mgruntime SHARED ${runtime_sources} "${CMAKE_CURRENT_SOURCE_DIR}/host.cpp")
 target_compile_features(mgruntime PRIVATE cxx_std_17)
 target_compile_definitions(mgruntime PRIVATE MG_SDL2 MG_VULKAN MG_FAUDIO DLL_EXPORT
     $<$<CONFIG:Debug>:DEBUG>)

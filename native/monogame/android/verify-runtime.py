@@ -32,6 +32,9 @@ for header in (script.parent / "include").glob("api_*.h"):
 # Preserve that ABI baseline; the managed synchronous SDL loop never calls it.
 baseline_unimplemented = {"MGP_Platform_StartRunLoop"}
 expected -= baseline_unimplemented
+startup_exports = {"SDL_main", "MGP_Android_GetHostApiVersion",
+                   "MGP_Android_RegisterRunCallback", "MGP_Android_ClearRunCallback"}
+expected |= startup_exports
 missing = expected - exports
 if missing:
     raise SystemExit(f"Missing Native API exports: {sorted(missing)}")
@@ -66,8 +69,16 @@ run(llvm / "llvm-objcopy", "--only-keep-debug", runtime, debug_file)
 manifest["result"] = "ok"
 manifest["elf"] = elf
 manifest["exports"] = {"expected": sorted(expected), "verifiedCount": len(expected),
+                       "androidStartup": sorted(startup_exports),
                        "baselineUnimplementedDeclarations": sorted(baseline_unimplemented - exports),
                        "allNativeApi": sorted(name for name in exports if name.startswith(("MGP_", "MGG_", "MGA_", "MGI_", "MGM_", "MG_Asset_")))}
+manifest["androidHost"] = {
+    "apiVersion": 1, "callingConvention": "Cdecl",
+    "sessionArgument": "--mgp-android-session=",
+    "sessionIds": "nonzero strictly increasing uint64 for loaded-library lifetime",
+    "inputs": {name: entry(path) for name, path in {
+        "implementation": script / "host.cpp",
+        "header": script.parent / "include/api_MGP_Android.h"}.items()}}
 manifest["symbols"] = entry(debug_file)
 manifest["shaders"] = json.loads((shaders / "shader-manifest.json").read_text())
 manifest["shaders"]["manifest"] = entry(shaders / "shader-manifest.json")
