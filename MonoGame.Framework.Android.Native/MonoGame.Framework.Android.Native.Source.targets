@@ -1,0 +1,5 @@
+<Project>
+  <!-- Source consumers import this file in the app, where the Android SDK keeps
+       the selected RID. ProjectReference builds of libraries are RID-independent. -->
+  <Import Project="$(MSBuildThisFileDirectory)../src/NuGetPackages/MonoGame.Runtime.Android.Vulkan/buildTransitive/MonoGame.Runtime.Android.Vulkan.targets" />
+</Project>

@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="../MonoGame.props" />
+  <PropertyGroup>
+    <TargetFramework>net10.0-android36.0</TargetFramework>
+    <SupportedOSPlatformVersion>24.0</SupportedOSPlatformVersion>
+    <AssemblyName>MonoGame.Framework.Android.Native</AssemblyName>
+    <RootNamespace>Microsoft.Xna.Framework</RootNamespace>
+    <Description>SDL2 Android Java host bindings for MonoGame Native.</Description>
+    <IsBindingProject>true</IsBindingProject>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Configurations>Debug;Release</Configurations>
+    <_SdlAndroidJavaRoot>$(MSBuildThisFileDirectory)../native/monogame/external/sdl2/sdl/android-project/app/src/main/java</_SdlAndroidJavaRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../MonoGame.Framework/MonoGame.Framework.Native.csproj" />
+    <!-- Bind compiles the original complete source set into the SDK's intermediate
+         classes.zip, which is packaged intact alongside the managed bindings. -->
+    <AndroidJavaSource Include="$(_SdlAndroidJavaRoot)/org/libsdl/app/*.java" Bind="true" />
+    <TransformFile Include="Transforms/Metadata.xml" />
+    <ProguardConfiguration Include="sdl2.proguard" />
+  </ItemGroup>
+  <!-- The same native artifacts are consumed by source apps and local packages.
+       AndroidVulkanNativeRoot is the caller's external build root. -->
+  <Import Project="MonoGame.Framework.Android.Native.Source.targets" Condition="'$(RuntimeIdentifier)' != ''" />
+  <Target Name="ValidateVendoredSdlJavaSources" BeforeTargets="_CollectJavaSourceForBinding">
+    <Error Condition="!Exists('$(_SdlAndroidJavaRoot)/org/libsdl/app/SDLActivity.java')" Text="Initialize the pinned native/monogame/external/sdl2 submodules before building the Android Native bridge." />
+  </Target>
+</Project>

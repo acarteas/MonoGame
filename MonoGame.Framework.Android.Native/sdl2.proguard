@@ -1,0 +1,4 @@
+# SDL registers native methods and looks up companion classes by these names.
+# Package-private input, audio, controller and HID classes must also survive R8.
+-keep class org.libsdl.app.** { *; }
+-keep interface org.libsdl.app.** { *; }
