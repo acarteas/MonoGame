@@ -6,12 +6,12 @@
 
 #include "mg_common.h"
 
-#include "AlphaTestEffect.vk.mgfxo.h"
-#include "BasicEffect.vk.mgfxo.h"
-#include "DualTextureEffect.vk.mgfxo.h"
-#include "EnvironmentMapEffect.vk.mgfxo.h"
-#include "SkinnedEffect.vk.mgfxo.h"
-#include "SpriteEffect.vk.mgfxo.h"
+#include <AlphaTestEffect.vk.mgfxo.h>
+#include <BasicEffect.vk.mgfxo.h>
+#include <DualTextureEffect.vk.mgfxo.h>
+#include <EnvironmentMapEffect.vk.mgfxo.h>
+#include <SkinnedEffect.vk.mgfxo.h>
+#include <SpriteEffect.vk.mgfxo.h>
 #include "mg_effect.h"
 
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1

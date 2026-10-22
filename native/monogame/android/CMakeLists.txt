@@ -81,3 +81,32 @@ set_target_properties(FAudio-static PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # The paths are generated from targets rather than guessed library suffixes.
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/dependency-paths.json" CONTENT
     "{\n  \"sdl2\": \"$<TARGET_FILE:SDL2>\",\n  \"faudio\": \"$<TARGET_FILE:FAudio-static>\"\n}\n")
+
+# Build the existing Native renderer; SDL remains shared and FAudio is embedded.
+if(NOT IS_ABSOLUTE "${MONOGAME_SHADER_DIR}" OR
+   NOT EXISTS "${MONOGAME_SHADER_DIR}/shader-manifest.json")
+    message(FATAL_ERROR "Generate host Vulkan effects with build.sh before configuring mgruntime")
+endif()
+file(REAL_PATH "${MONOGAME_SHADER_DIR}" shader_root)
+cmake_path(IS_PREFIX checkout_root "${shader_root}" NORMALIZE shaders_in_source)
+if(shaders_in_source)
+    message(FATAL_ERROR "Generated Vulkan effects must be outside the MonoGame checkout")
+endif()
+set(runtime_root "${CMAKE_CURRENT_SOURCE_DIR}/..")
+file(GLOB runtime_sources CONFIGURE_DEPENDS
+    "${runtime_root}/common/*.cpp" "${runtime_root}/sdl/*.cpp"
+    "${runtime_root}/vulkan/*.cpp" "${runtime_root}/faudio/*.cpp")
+add_library(mgruntime SHARED ${runtime_sources})
+target_compile_features(mgruntime PRIVATE cxx_std_17)
+target_compile_definitions(mgruntime PRIVATE MG_SDL2 MG_VULKAN MG_FAUDIO DLL_EXPORT
+    $<$<CONFIG:Debug>:DEBUG>)
+target_include_directories(mgruntime PRIVATE
+    "${MONOGAME_SHADER_DIR}" "${runtime_root}/include"
+    "${runtime_root}/../../external/stb"
+    "${runtime_root}/external/volk" "${runtime_root}/external/vma/include")
+target_link_libraries(mgruntime PRIVATE SDL2::SDL2 FAudio-static android log dl)
+target_link_options(mgruntime PRIVATE "-Wl,--no-undefined" "-Wl,-z,max-page-size=16384")
+# Release artifacts also retain symbols externally; packaging may strip later.
+target_compile_options(mgruntime PRIVATE -g)
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/runtime-paths.json" CONTENT
+    "{\n  \"mgruntime\": \"$<TARGET_FILE:mgruntime>\"\n}\n")

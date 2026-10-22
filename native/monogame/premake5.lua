@@ -81,7 +81,7 @@ function vulkan()
 
     files {"vulkan/**.h", "vulkan/**.cpp"}
 
-    includedirs {"external/vulkan-headers/include", "external/volk", "external/vma/include",
+    includedirs {"vulkan", "external/vulkan-headers/include", "external/volk", "external/vma/include",
         path.join(vulkan_sdk, "include")}
 
     filter {"system:macosx"}

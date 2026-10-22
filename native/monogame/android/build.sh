@@ -12,7 +12,8 @@ Usage: build.sh --build-root DIR [--sdk-root DIR] [--ndk-root DIR]
                 [--abi x86_64|arm64-v8a] [--configuration Debug|Release]
                 [--preflight-only]
 
-Builds vendored shared SDL2 and static PIC FAudio for both ABIs by default.
+Builds Native Vulkan mgruntime, shared SDL2 and static PIC FAudio for both ABIs.
+The host effect compiler runs under its own .NET lock; do not wrap this script in that lock.
 --preflight-only validates the tools without configuring or building. The root must be an
 existing directory owned and writable by the caller, outside the SDK, NDK,
 source checkout, and desktop dependency build roots. ANDROID_HOME is used when
@@ -280,11 +281,16 @@ if "$preflight_only"; then
 fi
 
 [[ -f "${ndk_root}/build/cmake/android.toolchain.cmake" ]] || fail "official NDK CMake toolchain is missing"
+host_root="${build_root}/host/${configuration}"
+# Validate host paths before the compiler can create external build outputs.
+python3 "${SCRIPT_DIR}/validate-output-paths.py" "$build_root" "$host_root"
+"${SCRIPT_DIR}/generate-shaders.sh" "$SOURCE_ROOT" "$host_root" "$configuration"
 selected_abis=("${ALLOWED_ABIS[@]}")
 [[ "$abi" == all ]] || selected_abis=("$abi")
 for selected_abi in "${selected_abis[@]}"; do
     build_dir="${build_root}/build/${selected_abi}/${configuration}"
     artifact_dir="${build_root}/artifacts/${selected_abi}/${configuration}"
+    python3 "${SCRIPT_DIR}/validate-output-paths.py" "$build_root" "$build_dir" "$artifact_dir"
     # Descendant symlinks must not redirect writes into a protected worktree.
     # Existing directories are reusable; no directories or caller files are deleted.
     python3 - "$build_root" "$build_dir" "$artifact_dir" <<'PY'
@@ -304,7 +310,8 @@ for value in sys.argv[2:]:
         raise SystemExit(f"Native output path changed during validation: {path}")
 build, artifacts = map(pathlib.Path, sys.argv[2:])
 for path in [build / "lib", artifacts / "libSDL2.so", artifacts / "libc++_shared.so",
-             artifacts / "build-manifest.json", build / "lib/libFAudio.a"]:
+             artifacts / "build-manifest.json", artifacts / "libmgruntime.so",
+             artifacts / "symbols", build / "lib/libFAudio.a"]:
     if path.is_symlink():
         raise SystemExit(f"Refusing symlink in native output path: {path}")
 PY
@@ -312,9 +319,9 @@ PY
         -DCMAKE_TOOLCHAIN_FILE="${ndk_root}/build/cmake/android.toolchain.cmake" \
         -DANDROID_ABI="$selected_abi" -DANDROID_PLATFORM="android-${EXPECTED_API}" \
         -DANDROID_STL=c++_shared -DCMAKE_BUILD_TYPE="$configuration" \
-        -DMONOGAME_ARTIFACT_DIR="$artifact_dir" \
+        -DMONOGAME_ARTIFACT_DIR="$artifact_dir" -DMONOGAME_SHADER_DIR="$host_root/shaders" \
         -DCMAKE_POLICY_VERSION_MINIMUM=3.10
-    cmake --build "$build_dir" --target SDL2 FAudio-static
+    cmake --build "$build_dir" --target mgruntime --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
 
     case "$selected_abi" in
         x86_64) ndk_triple=x86_64-linux-android ;;
@@ -339,6 +346,7 @@ artifacts = pathlib.Path(artifact_path)
 script = pathlib.Path(script_path)
 preflight = json.loads(pathlib.Path(preflight_path).read_text())
 paths = json.loads((build / "dependency-paths.json").read_text())
+paths.update(json.loads((build / "runtime-paths.json").read_text()))
 
 def command(*args):
     return subprocess.check_output(args, text=True).strip()
@@ -367,7 +375,7 @@ for name, path in {**paths, "cxxShared": str(artifacts / "libc++_shared.so")}.it
     libraries[name] = {"path": path, "sha256": digest(path), "bytes": pathlib.Path(path).stat().st_size}
 
 manifest = {
-    "schemaVersion": 1, "phase": "dependencies", "result": "ok",
+    "schemaVersion": 1, "phase": "runtime", "result": "pending-verification",
     "recordedUtc": datetime.now(timezone.utc).isoformat(),
     "abi": abi, "configuration": preflight["resolved"]["configuration"],
     "minApi": preflight["resolved"]["minApi"], "compileSdk": preflight["resolved"]["compileSdk"],
@@ -381,7 +389,8 @@ manifest = {
                 "sdl2": source(script.parent / "external/sdl2/sdl"),
                 "faudio": source(script.parent / "external/faudio")},
     "buildInputs": {name: {"path": str(script / name), "sha256": digest(script / name)}
-                    for name in ("CMakeLists.txt", "build.sh", "toolchain.json")},
+                    for name in ("CMakeLists.txt", "build.sh", "toolchain.json", "generate-shaders.sh",
+                                 "validate-output-paths.py", "verify-runtime.py")},
     "libraries": libraries,
     "cxxSharedSource": {"path": str(pathlib.Path(runtime_path).resolve()), "sha256": digest(runtime_path)},
     "cmakeCache": {"path": str(build / "CMakeCache.txt"), "sha256": digest(build / "CMakeCache.txt")},
@@ -395,6 +404,7 @@ with temporary.open("x", encoding="utf-8") as output:
     json.dump(manifest, output, indent=2, sort_keys=True)
     output.write("\n")
 temporary.replace(destination)
-print(f"Dependency build manifest: {destination}")
+print(f"Runtime build manifest: {destination}")
 PY
+    python3 "${SCRIPT_DIR}/verify-runtime.py" "$artifact_dir" "$llvm_bin" "$SCRIPT_DIR" "$host_root/shaders"
 done
