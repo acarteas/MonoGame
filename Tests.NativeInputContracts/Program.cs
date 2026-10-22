@@ -3,6 +3,8 @@ using System.Runtime.InteropServices;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Input;
 using Microsoft.Xna.Framework.Input.Touch;
+using Microsoft.Xna.Framework.Graphics;
+using System.Reflection;
 using MonoGame.Interop;
 
 internal static unsafe class Program
@@ -106,6 +108,48 @@ internal static unsafe class Program
         try { GamePad.Add(0); }
         catch (ArgumentException) { duplicateRejected = true; }
         Check(duplicateRejected, "duplicate Add remains strict within session");
+
+        if (mode == "android")
+        {
+            var setLifecycle = (delegate* unmanaged[Cdecl]<uint, void>)NativeLibrary.GetExport(
+                NativeLibrary.Load(Environment.GetCommandLineArgs()[1]), "Test_SetLifecycle");
+            setLifecycle(3);
+            Check(!old.BeforeDraw(new GameTime()) && !first.IsActive, "paused lifecycle suppresses actual BeforeDraw");
+            Check(GamePad.Handle == nativeAddress && GamePad.GetCapabilities(0).IsConnected, "deactivation preserves live owner/controller identities");
+            Check(GamePad.GetState(0).Buttons.A == ButtonState.Released && GamePad.GetState(0).ThumbSticks.Left.X == 0 &&
+                Keyboard.GetState().GetPressedKeys().Length == 0 && Mouse.GetState().LeftButton == ButtonState.Released, "deactivation neutralizes held state");
+            setLifecycle(1);
+            old.BeforeDraw(new GameTime());
+            Check(first.IsActive && GamePad.GetCapabilities(0).IsConnected, "resume preserves controller index and activity");
+            GamePad.ChangeState(0, 3, ControllerInput.A, 1);
+            Keyboard.Keys.Add(Keys.A);
+            setLifecycle(0);
+            Check(!old.BeforeDraw(new GameTime()) && !first.IsActive &&
+                Keyboard.GetState().GetPressedKeys().Length == 0 && GamePad.GetState(0).Buttons.A == ButtonState.Released,
+                "unready actual BeforeDraw neutralizes new held input");
+            setLifecycle(1);
+            old.BeforeDraw(new GameTime());
+            GamePad.ChangeState(0, 4, ControllerInput.A, 1);
+            Keyboard.Keys.Add(Keys.A);
+            setLifecycle(3);
+            setLifecycle(1);
+            old.BeforeDraw(new GameTime());
+            Check(first.IsActive && GamePad.GetCapabilities(0).IsConnected &&
+                GamePad.GetState(0).Buttons.A == ButtonState.Released && Keyboard.GetState().GetPressedKeys().Length == 0,
+                "coalesced pause/resume retirement still neutralizes held input");
+            Keyboard.Keys.Add(Keys.B);
+            old.BeforeDraw(new GameTime());
+            Check(Keyboard.Keys.Contains(Keys.B), "unchanged ready checkpoint repeatedly neutralized fresh input");
+            var deferred = (GraphicsDevice)RuntimeHelpers.GetUninitializedObject(typeof(GraphicsDevice));
+            typeof(GraphicsDevice).GetField("_currentFrame", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(deferred, -1);
+            var dirty = typeof(GraphicsDevice).GetField("_rasterizerStateDirty", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            dirty.SetValue(deferred, true);
+            deferred.Clear(Color.Black);
+            typeof(GraphicsDevice).GetMethod("PlatformDrawPrimitives", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(deferred,
+                new object[] { PrimitiveType.TriangleList, 0, 1 });
+            Check(count(4) == 0 && (bool)dirty.GetValue(deferred)!, "unready acquisition suppresses actual native clear/draw and preserves dirty state");
+            GC.SuppressFinalize(deferred);
+        }
 
         if (mode == "destroy")
         {

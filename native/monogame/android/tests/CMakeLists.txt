@@ -37,3 +37,13 @@ target_link_libraries(android_session_reuse_tests PRIVATE Threads::Threads SDL2:
 target_link_options(android_session_reuse_tests PRIVATE "-Wl,--wrap=SDL_Quit")
 add_test(NAME android_session_reuse COMMAND android_session_reuse_tests)
 set_tests_properties(android_session_reuse PROPERTIES TIMEOUT 30)
+
+add_executable(android_surface_tests ../host.cpp surface_lifecycle_tests.cpp)
+target_compile_features(android_surface_tests PRIVATE cxx_std_17)
+target_compile_definitions(android_surface_tests PRIVATE MGP_ANDROID_HOST_TEST)
+target_include_directories(android_surface_tests PRIVATE ../../include)
+target_compile_options(android_surface_tests PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(android_surface_tests PRIVATE Threads::Threads SDL2::SDL2-static)
+target_link_options(android_surface_tests PRIVATE "-Wl,--wrap=SDL_Quit")
+add_test(NAME android_surface_lifecycle COMMAND android_surface_tests)
+set_tests_properties(android_surface_lifecycle PROPERTIES TIMEOUT 30)

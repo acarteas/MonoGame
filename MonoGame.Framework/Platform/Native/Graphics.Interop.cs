@@ -153,6 +153,9 @@ internal enum BufferType
 
 internal static unsafe partial class MGG
 {
+    [DllImport(MGP.MonoGameNativeDLL, EntryPoint = "MGG_GraphicsDevice_ProcessAndroidLifecycle", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern byte GraphicsDevice_ProcessAndroidLifecycle(MGG_GraphicsDevice* device, byte prepare);
+
     #region Effect Resources
 
     [DllImport(MGP.MonoGameNativeDLL, EntryPoint = "MGG_EffectResource_GetBytecode", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)]

@@ -7,6 +7,9 @@
 #include "mg_common.h"
 
 #include <SDL.h>
+#if defined(__ANDROID__)
+#include "../android/surface_lifecycle.h"
+#endif
 
 #if defined(__ANDROID__) && defined(MG_VULKAN)
 #include <SDL_vulkan.h>
@@ -19,6 +22,11 @@
 
 struct MGP_Platform
 {
+#if defined(__ANDROID__)
+    uint64_t sessionId = 0;
+    uint64_t lifecycleRevision = 0;
+    uint64_t inputRetireRevision = 0;
+#endif
     std::vector<MGP_Window*> windows;
     std::queue<MGP_Event> queued_events;
     std::map<mgint, SDL_GameController*> controllers;
@@ -206,6 +214,12 @@ MGP_Platform* MGP_Platform_Create(MGGameRunBehavior& behavior)
     //
     //_CrtSetBreakAlloc(327);
 
+#if defined(__ANDROID__)
+
+    // The game must service retirement requests even while Android is paused.
+    // SDL samples this when creating the video device, before SDL_Init returns.
+    SDL_SetHint(SDL_HINT_ANDROID_BLOCK_ON_PAUSE, "0");
+#endif
 	if (SDL_WasInit(0) == 0) {
 		if (SDL_Init(
 			SDL_INIT_VIDEO |
@@ -228,6 +242,18 @@ MGP_Platform* MGP_Platform_Create(MGGameRunBehavior& behavior)
 	behavior = MGGameRunBehavior::Synchronous;
 
 	auto platform = new MGP_Platform();
+#if defined(__ANDROID__)
+    MGP_Android_Lifecycle lifecycle;
+    if (MGP_Android_GetLifecycle(platform->sessionId, &lifecycle) == MGP_ANDROID_OK)
+    {
+        platform->sessionId = lifecycle.SessionId;
+    }
+    else
+    {
+        delete platform;
+        return nullptr;
+    }
+#endif
 	return platform;
 }
 
@@ -412,6 +438,37 @@ static MGControllerInput FromSDLAxis(Uint8 axis)
 
 mgbyte MGP_Platform_PollEvent(MGP_Platform* platform, MGP_Event& event_)
 {
+#if defined(__ANDROID__)
+    MGP_Android_Lifecycle lifecycle;
+    if (MGP_Android_GetLifecycle(platform->sessionId, &lifecycle) == MGP_ANDROID_OK &&
+        lifecycle.Revision != platform->lifecycleRevision)
+    {
+        static_assert(sizeof(MGP_AndroidLifecycle) == sizeof(MGP_Android_Lifecycle), "lifecycle ABI");
+        platform->lifecycleRevision = lifecycle.Revision;
+        if (lifecycle.RetireRevision > platform->inputRetireRevision)
+        {
+            platform->inputRetireRevision = lifecycle.RetireRevision;
+            MGP_Android_DiscardPendingInput();
+            std::queue<MGP_Event> retained;
+            while (!platform->queued_events.empty())
+            {
+                const auto& pending = platform->queued_events.front();
+                if (!((pending.Type >= MGEventType::KeyDown && pending.Type <= MGEventType::MouseWheel) ||
+                    pending.Type == MGEventType::ControllerStateChange))
+                {
+                    retained.push(pending);
+                }
+                platform->queued_events.pop();
+            }
+            platform->queued_events.swap(retained);
+        }
+        event_ = {};
+        event_.Type = MGEventType::AndroidLifecycle;
+        memcpy(&event_.AndroidLifecycle, &lifecycle, sizeof(lifecycle));
+        return true;
+    }
+#endif
+
 	assert(platform != nullptr);
 
     SDL_Event ev;
@@ -434,6 +491,20 @@ mgbyte MGP_Platform_PollEvent(MGP_Platform* platform, MGP_Event& event_)
 
         switch (ev.type)
         {
+#if defined(__ANDROID__)
+        case SDL_APP_WILLENTERBACKGROUND:
+        case SDL_APP_DIDENTERBACKGROUND:
+            event_.Type = MGEventType::AppBackground;
+            return true;
+        case SDL_APP_WILLENTERFOREGROUND:
+        case SDL_APP_DIDENTERFOREGROUND:
+            event_.Type = MGEventType::AppForeground;
+            return true;
+        case SDL_APP_TERMINATING:
+            event_.Type = MGEventType::AppTerminating;
+            return true;
+#endif
+
         case SDL_QUIT:
             event_.Type = MGEventType::Quit;
             return true;
@@ -708,6 +779,15 @@ mgbyte MGP_Platform_BeforeUpdate(MGP_Platform* platform)
 
 mgbyte MGP_Platform_BeforeDraw(MGP_Platform* platform)
 {
+#if defined(__ANDROID__)
+    MGP_Android_Lifecycle lifecycle;
+    if (MGP_Android_GetLifecycle(platform->sessionId, &lifecycle) != MGP_ANDROID_OK ||
+        lifecycle.Generation == 0 || lifecycle.Flags != MGP_ANDROID_SURFACE_READY)
+    {
+        return false;
+    }
+#endif
+
 	assert(platform != nullptr);
 
     // TO DO: Vulkan wants that we stop rendering if the window is minimized on Windows (because surface extent is 0x0 when this happens, which will crash Vulkan).

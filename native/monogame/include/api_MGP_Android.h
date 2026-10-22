@@ -20,7 +20,7 @@
 #define MGP_ANDROID_CALL
 #endif
 
-#define MGP_ANDROID_HOST_API_VERSION UINT32_C(1)
+#define MGP_ANDROID_HOST_API_VERSION UINT32_C(2)
 #define MGP_ANDROID_SESSION_ARGUMENT "--mgp-android-session="
 
 // All ABI status results are int32_t, independent of native enum size.
@@ -55,6 +55,52 @@ MG_EXPORT int32_t MGP_ANDROID_CALL MGP_Android_RegisterRunCallback(
 // running, Clear returns BUSY and the caller MUST retain all callback state.
 // Even after callback return, a new session requires a successful owner Clear.
 MG_EXPORT int32_t MGP_ANDROID_CALL MGP_Android_ClearRunCallback(uint64_t sessionId);
+
+// A single session's observed SurfaceHolder state. Fixed layout on both ABIs.
+// Generation increases only for a real surfaceCreated callback, never for resize.
+// RetireRevision closes draw admission immediately; only the game thread may ack
+// after retiring all swapchain/surface GPU work. No UI pointer crosses this ABI.
+#define MGP_ANDROID_SURFACE_READY UINT32_C(1)
+#define MGP_ANDROID_PAUSED UINT32_C(2)
+#define MGP_ANDROID_EXITING UINT32_C(4)
+#define MGP_ANDROID_QUARANTINED UINT32_C(8)
+typedef struct MGP_Android_Lifecycle
+{
+    uint64_t SessionId;
+    uint64_t Generation;
+    uint64_t Revision;
+    uint64_t RetireRevision;
+    uint64_t AcknowledgedRevision;
+    uint32_t Flags;
+    uint32_t Reserved;
+} MGP_Android_Lifecycle;
+
+// Publish never calls SDL, Vulkan or managed code. Exiting/quarantine are sticky.
+MG_EXPORT int32_t MGP_ANDROID_CALL MGP_Android_PublishLifecycle(uint64_t sessionId,
+    uint64_t generation, uint32_t flags, uint64_t* revision);
+
+// sessionId=0 is a game-thread query of the current owner. Other IDs must match.
+MG_EXPORT int32_t MGP_ANDROID_CALL MGP_Android_GetLifecycle(uint64_t sessionId,
+    MGP_Android_Lifecycle* snapshot);
+
+// Acks cover exactly the caller's retired snapshot, never a later request.
+// While Running this is rejected off the owning SDL_main thread. Consumers bind
+// the session once at construction; every later read and ack passes that ID.
+MG_EXPORT int32_t MGP_ANDROID_CALL MGP_Android_AcknowledgeRetired(uint64_t sessionId,
+    uint64_t revision);
+
+// Finite wait; releases hostMutex while asleep. BUSY means NO permission to
+// release SDL's native window. The caller must quarantine instead of falling through.
+MG_EXPORT int32_t MGP_ANDROID_CALL MGP_Android_WaitRetired(uint64_t sessionId,
+    uint64_t revision, uint32_t timeoutMilliseconds);
+
+#ifdef __cplusplus
+struct MGG_GraphicsDevice;
+
+// Game-thread checkpoint. prepare=0 retires pending work without acquiring;
+// return indicates a valid recording frame, not just a ready application state.
+MG_EXPORT mgbyte MGG_GraphicsDevice_ProcessAndroidLifecycle(MGG_GraphicsDevice* device, mgbyte prepare);
+#endif
 
 // SDL2 nativeRunMain calls this exact Cdecl signature on its game thread.
 // The managed activity must return exactly one GetArguments() string:

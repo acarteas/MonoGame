@@ -2,6 +2,7 @@ using System;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Threading.Tasks;
 using Android.App;
 using Android.Content.Res;
 using Android.OS;
@@ -9,6 +10,7 @@ using Android.Runtime;
 using Android.Views;
 using Java.Interop;
 using Org.Libsdl.App;
+using MonoGame.Interop;
 
 namespace Microsoft.Xna.Framework;
 
@@ -19,8 +21,19 @@ public abstract class AndroidNativeGameActivity : SDLActivity
     private static readonly JniPeerMembers ActivityMembers = new JniPeerMembers("android/app/Activity", typeof(Activity));
     private AndroidNativeRunSession _session;
     private bool _sdlInitialized;
-    private bool _startupSucceeded;
-    private bool _destroying;
+    private volatile bool _startupSucceeded;
+    private volatile bool _destroying;
+    private volatile bool _quarantined;
+    private readonly object _surfacePublishGate = new object();
+    private ulong _surfaceObservation;
+    private bool _resumed;
+    private bool _focused = true;
+    private AndroidNativeSurfaceSession _surfaces;
+    private AndroidNativeSdlSurface _surface;
+#if DEBUG
+    private TaskCompletionSource<bool> _recreation;
+    private long _recreationGeneration;
+#endif
 
     /// <summary>Construct the game here. This method runs on the SDL game thread.</summary>
     protected abstract Game CreateGame();
@@ -35,13 +48,20 @@ public abstract class AndroidNativeGameActivity : SDLActivity
     protected virtual void OnGameLifecycleChanged(AndroidNativeGameLifecycle lifecycle) { }
 
     private bool IsOwner => Owners.IsOwner(this);
-    private bool CanUseSdl => IsOwner && _startupSucceeded && !_destroying;
+    private bool CanUseSdl => IsOwner && _startupSucceeded && !_destroying && !_quarantined;
+
+    /// <summary>The latest real SurfaceHolder observation; no generation is inferred from resize.</summary>
+    protected AndroidNativeSurfaceLifecycle SurfaceLifecycle => _surfaces?.Snapshot;
+
+    /// <summary>Receives immutable observations on the callback's emitting thread.</summary>
+    protected virtual void OnSurfaceLifecycleChanged(AndroidNativeSurfaceLifecycle lifecycle) { }
 
     protected override void OnCreate(Bundle savedInstanceState)
     {
         bool acquired = Owners.TryAcquire(this, out ulong sessionId);
         if (acquired)
         {
+            _surfaces = new AndroidNativeSurfaceSession(sessionId);
             _session = new AndroidNativeRunSession(sessionId, new NativeHostApi(),
                 AdmitCallback, AndroidNativeThreading.BindCurrentThread,
                 () => new GameLifetime(CreateGame()), global::Android.OS.Process.MyTid, Observe);
@@ -73,6 +93,7 @@ public abstract class AndroidNativeGameActivity : SDLActivity
             // onStart/onResume cannot run on this UI thread until this returns.
             _session.Register();
             _startupSucceeded = true;
+            PublishSurface();
         }
         catch (Exception error)
         {
@@ -92,7 +113,48 @@ public abstract class AndroidNativeGameActivity : SDLActivity
             return null;
         }
 
-        return new AndroidNativeSdlSurface(context) { IsCurrentOwner = () => IsOwner && !_destroying };
+        var surface = new AndroidNativeSdlSurface(context);
+        _surfaces.Attach(surface);
+        _surface = surface;
+        surface.IsCurrentOwner = () => IsOwner && !_destroying && !_quarantined && _surfaces.IsCurrent(surface);
+        surface.Created = () =>
+        {
+            if (!_surfaces.Created(surface))
+            {
+                return false;
+            }
+            PublishSurface();
+            return true;
+        };
+        surface.Changed = ready =>
+        {
+            if (_surfaces.Changed(surface, ready))
+            {
+                PublishSurface();
+#if DEBUG
+                if (ready && _recreation != null && _surfaces.Snapshot.SurfaceGeneration > _recreationGeneration)
+                {
+                    CompleteRecreation(true);
+                }
+#endif
+            }
+        };
+        surface.Destroying = () => RetireSurface(surface);
+        surface.Destroyed = () =>
+        {
+#if DEBUG
+            if (_recreation != null)
+            {
+
+                // Post after the real destroy callback has returned. No synchronous
+                // game-thread/UI rendezvous is needed to attach the view again.
+                var request = _recreation;
+                ulong session = _session.Snapshot.SessionId;
+                MLayout.Post(() => ReattachSurface(surface, request, session));
+            }
+#endif
+        };
+        return surface;
     }
 
     protected sealed override string[] GetArguments()
@@ -105,6 +167,10 @@ public abstract class AndroidNativeGameActivity : SDLActivity
             return Array.Empty<string>();
         }
 
+        if (_surface?.MIsSurfaceReady == true && _surfaces.Changed(_surface, true))
+        {
+            PublishSurface();
+        }
         return new[] { "--mgp-android-session=" + _session.Snapshot.SessionId.ToString(CultureInfo.InvariantCulture) };
     }
 
@@ -136,6 +202,8 @@ public abstract class AndroidNativeGameActivity : SDLActivity
             return;
         }
 
+        _surfaces.Exit();
+        PublishSurface();
         _session.RequestStop(_sdlInitialized ? NativeSendQuit : null);
     }
 
@@ -148,6 +216,18 @@ public abstract class AndroidNativeGameActivity : SDLActivity
         }
 
         _destroying = true;
+        _surfaces.Exit();
+        PublishSurface();
+#if DEBUG
+        CompleteRecreation(false);
+#endif
+        ObserveNativeQuarantine();
+        if (_quarantined)
+        {
+            _session.RequestStop(_sdlInitialized ? NativeSendQuit : null);
+            ActivityVoid("onDestroy", "()V");
+            return;
+        }
         Java.Lang.Thread gameThread = null;
         bool stopped = false;
         bool teardownSucceeded = false;
@@ -164,8 +244,20 @@ public abstract class AndroidNativeGameActivity : SDLActivity
             // A quit signal cannot race the callback's inactive transition into
             // native SDL_Quit. Join outside all host locks before Java nativeQuit
             // destroys SDL's Android JNI state; base must not send another quit.
-            gameThread?.Join();
+            gameThread?.Join(2000);
+            if (gameThread?.IsAlive == true)
+            {
+                Quarantine("activity-join-timeout");
+                ActivityVoid("onDestroy", "()V");
+                return;
+            }
             stopped = gameThread == null || !gameThread.IsAlive;
+            ObserveNativeQuarantine();
+            if (_quarantined)
+            {
+                ActivityVoid("onDestroy", "()V");
+                return;
+            }
             if (stopped && MSDLThread?.Equals(gameThread) == true)
             {
                 MSDLThread = null;
@@ -176,6 +268,7 @@ public abstract class AndroidNativeGameActivity : SDLActivity
         }
         catch (Exception error)
         {
+            Quarantine("activity-shutdown-failed");
             _session.Fail("activity-shutdown-failed", error);
             try
             {
@@ -227,17 +320,35 @@ public abstract class AndroidNativeGameActivity : SDLActivity
 
     protected sealed override void PauseNativeThread()
     {
-        if (CanUseSdl) { base.PauseNativeThread(); }
+        if (CanUseSdl)
+        {
+            _resumed = false;
+            _surfaces.Pause(true);
+            PublishSurface();
+            base.PauseNativeThread();
+        }
     }
 
     protected sealed override void ResumeNativeThread()
     {
-        if (CanUseSdl) { base.ResumeNativeThread(); }
+        if (CanUseSdl)
+        {
+            _resumed = true;
+            _surfaces.Pause(!_focused);
+            PublishSurface();
+            base.ResumeNativeThread();
+        }
     }
 
     public override void OnWindowFocusChanged(bool hasFocus)
     {
-        if (CanUseSdl) { base.OnWindowFocusChanged(hasFocus); }
+        if (CanUseSdl)
+        {
+            _focused = hasFocus;
+            _surfaces.Pause(!_resumed || !hasFocus);
+            PublishSurface();
+            base.OnWindowFocusChanged(hasFocus);
+        }
         else { ActivityVoid("onWindowFocusChanged", "(Z)V", new JniArgumentValue(hasFocus)); }
     }
 
@@ -328,6 +439,145 @@ public abstract class AndroidNativeGameActivity : SDLActivity
 
     protected sealed override void MessageboxCreateAndShow(Bundle args) { }
 
+    private ulong PublishSurface()
+    {
+        AndroidNativeSurfaceLifecycle state;
+        ulong revision = 0;
+        lock (_surfacePublishGate)
+        {
+
+            // Capture inside the publication gate: a game-thread startup readiness
+            // publication must not overwrite a newer UI destruction observation.
+            state = _surfaces?.Snapshot;
+            if (state == null)
+            {
+                return 0;
+            }
+            state.Observation = checked(++_surfaceObservation);
+            if (_startupSucceeded)
+            {
+                uint flags = (state.SurfaceReady ? 1u : 0u) | (state.SurfacePaused ? 2u : 0u) |
+                    (state.SurfaceExiting ? 4u : 0u) | (state.Quarantined ? 8u : 0u);
+                int result = MGP_Android_PublishLifecycle(state.SessionId, (ulong)state.SurfaceGeneration, flags, out revision);
+                if (result != 0)
+                {
+                    throw new InvalidOperationException("Lifecycle publication rejected: " + result);
+                }
+            }
+        }
+        OnSurfaceLifecycleChanged(state);
+        return revision;
+    }
+
+    private bool RetireSurface(AndroidNativeSdlSurface surface)
+    {
+        if (!IsOwner || _quarantined || !_surfaces.Destroying(surface))
+        {
+            return false;
+        }
+        ulong revision = PublishSurface();
+        if (_startupSucceeded && MGP_Android_WaitRetired(_session.Snapshot.SessionId, revision, 1500) != 0)
+        {
+
+            // Never invoke base: SDL would release ANativeWindow while the game
+            // may still own GPU work. Retain this owner and all native/Java roots.
+            Quarantine("surface-retirement-timeout");
+            return false;
+        }
+        ObserveNativeQuarantine();
+        return !_quarantined;
+    }
+
+    private void ObserveNativeQuarantine()
+    {
+        if (_startupSucceeded && !_quarantined &&
+            MGP_Android_GetLifecycle(_session.Snapshot.SessionId, out var state) == 0 && (state.Flags & 8) != 0)
+        {
+            Quarantine("native-surface-quarantined");
+        }
+    }
+
+    private void Quarantine(string reason)
+    {
+        _quarantined = true;
+        _surfaces.Exit(true);
+        PublishSurface();
+#if DEBUG
+        RunOnUiThread(() => CompleteRecreation(false));
+#endif
+        _session.Fail(reason, new InvalidOperationException("Android Native session quarantined; SDL window/JNI ownership retained."));
+        _session.RequestStop(_sdlInitialized ? NativeSendQuit : null);
+    }
+
+#if DEBUG
+
+    /// <summary>Debug diagnostics only: remove/reattach the real SDL SurfaceView.</summary>
+    protected Task<bool> RecreateSurfaceForDiagnostics()
+    {
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        ulong session = _session?.Snapshot.SessionId ?? 0;
+        RunOnUiThread(() =>
+        {
+            var surface = _surface;
+            if (!CanUseSdl || session == 0 || _session.Snapshot.SessionId != session ||
+                surface == null || _recreation != null || !_surfaces.IsCurrent(surface) ||
+                !_surfaces.Snapshot.SurfaceReady || surface.Parent is not ViewGroup parent)
+            {
+                completion.TrySetResult(false);
+                return;
+            }
+            _recreation = completion;
+            _recreationGeneration = _surfaces.Snapshot.SurfaceGeneration;
+            parent.RemoveView(surface);
+            _ = ExpireRecreation(completion);
+        });
+        return completion.Task;
+    }
+
+    private async Task ExpireRecreation(TaskCompletionSource<bool> request)
+    {
+        await Task.Delay(4000).ConfigureAwait(false);
+        RunOnUiThread(() =>
+        {
+            if (ReferenceEquals(_recreation, request))
+            {
+                CompleteRecreation(false);
+            }
+        });
+    }
+
+    private void ReattachSurface(AndroidNativeSdlSurface surface, TaskCompletionSource<bool> request, ulong session)
+    {
+        if (request == null || !ReferenceEquals(_recreation, request))
+        {
+            request?.TrySetResult(false);
+            return;
+        }
+        if (!CanUseSdl || _session.Snapshot.SessionId != session || !_surfaces.IsCurrent(surface) || surface.Parent != null)
+        {
+            CompleteRecreation(false);
+            return;
+        }
+        MLayout.AddView(surface);
+    }
+
+    private void CompleteRecreation(bool success)
+    {
+        var completion = _recreation;
+        _recreation = null;
+        completion?.TrySetResult(success);
+    }
+#endif
+
+    [DllImport("mgruntime", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    private static extern int MGP_Android_PublishLifecycle(ulong sessionId, ulong generation, uint flags, out ulong revision);
+
+    [DllImport("mgruntime", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    private static extern int MGP_Android_WaitRetired(ulong sessionId, ulong revision, uint timeoutMilliseconds);
+
+    [DllImport("mgruntime", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    private static extern int MGP_Android_GetLifecycle(ulong sessionId, out MGP_AndroidLifecycle snapshot);
+
     private unsafe void ActivityVoid(string name, string signature, params JniArgumentValue[] arguments)
     {
         var type = ActivityMembers.JniPeerType.PeerReference;
@@ -342,6 +592,10 @@ public abstract class AndroidNativeGameActivity : SDLActivity
 
     private void Observe(AndroidNativeGameLifecycle lifecycle)
     {
+        if (lifecycle.Stage == "game-dispose-failed" && !_quarantined)
+        {
+            Quarantine("game-disposal-quarantined");
+        }
         global::Android.Util.Log.Info("LAL.AndroidVK", JsonSerializer.Serialize(lifecycle,
             AndroidNativeLifecycleJsonContext.Default.AndroidNativeGameLifecycle));
         OnGameLifecycleChanged(lifecycle);

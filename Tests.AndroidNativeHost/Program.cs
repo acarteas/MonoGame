@@ -14,6 +14,8 @@ var tests = new (string Name, Action Run)[]
     ("stale Activity release cannot steal the next monotonic session", StaleOwner),
     ("failed JNI teardown quarantines owner and callback roots", FailedShutdown),
     ("registration version/status failures release unowned roots", RegistrationFailure),
+    ("surface generations, readiness and stale-view admission use observed callbacks", SurfaceState),
+    ("fixed lifecycle and appended event ABI layouts", SurfaceAbi),
     ("Native Threading binds and drains its real queue on game thread", NativeThreadBinding)
 };
 foreach (var test in tests)
@@ -23,6 +25,54 @@ foreach (var test in tests)
 }
 
 Console.WriteLine("PASS " + tests.Length + " Android Native host state tests");
+
+static void SurfaceState()
+{
+    var state = new AndroidNativeSurfaceSession(71);
+    object first = new(), second = new();
+    state.Attach(first);
+    Check(state.Destroying(first), "destroy before create was rejected");
+    Check(state.Snapshot.SurfaceGeneration == 0 && !state.Changed(first, true), "destroy fabricated a generation/readiness");
+    Check(state.Created(first) && !state.Created(first), "duplicate create advanced generation");
+    Check(state.Changed(first, true) && state.Snapshot.SurfaceGeneration == 1, "actual first holder not ready");
+    state.Pause(false);
+    for (int cycle = 0; cycle < 4; cycle++)
+    {
+        state.Pause(true);
+        Check(state.Snapshot.SurfacePaused && state.Snapshot.SurfaceReady, "pause fabricated surface destruction");
+        state.Pause(false);
+    }
+    Check(state.Destroying(first) && !state.Snapshot.SurfaceReady, "destruction left admission open");
+    state.Attach(second);
+    Check(!state.IsCurrent(first) && !state.Created(first) && !state.Changed(first, true) && !state.Destroying(first), "same-owner old view admitted");
+    Check(state.Created(second) && state.Changed(second, true) && state.Snapshot.SurfaceGeneration == 2, "replacement holder generation");
+    Check(state.Destroying(second) && state.Created(second) && state.Snapshot.SurfaceGeneration == 3, "same view new holder generation");
+    state.Exit(true);
+    state.Pause(false);
+    Check(!state.IsCurrent(second) && !state.Created(second) && !state.Changed(second, true), "exit admitted late callback");
+    Check(state.Snapshot.Quarantined && state.Snapshot.SurfaceExiting && !state.Snapshot.SurfaceReady, "quarantine was reversible");
+    var exhausted = new AndroidNativeSurfaceSession(72);
+    exhausted.Attach(first);
+    typeof(AndroidNativeSurfaceSession).GetField("_generation", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+        .SetValue(exhausted, long.MaxValue);
+    bool overflowRejected = false;
+    try { exhausted.Created(first); }
+    catch (OverflowException) { overflowRejected = true; }
+    Check(overflowRejected && exhausted.Snapshot.SurfaceGeneration == long.MaxValue && !exhausted.Snapshot.SurfaceReady,
+        "surface generation wrapped or became ready on overflow");
+}
+
+static void SurfaceAbi()
+{
+    Check(Marshal.SizeOf<MonoGame.Interop.MGP_AndroidLifecycle>() == 48, "native lifecycle size");
+    Check(Marshal.OffsetOf<MonoGame.Interop.MGP_AndroidLifecycle>("Flags").ToInt32() == 40 &&
+        Marshal.OffsetOf<MonoGame.Interop.MGP_AndroidLifecycle>("Reserved").ToInt32() == 44, "lifecycle fixed flags offsets");
+    Check(Marshal.SizeOf<MonoGame.Interop.MGP_Event>() == 60 &&
+        Marshal.OffsetOf<MonoGame.Interop.MGP_Event>("AndroidLifecycle").ToInt32() == 12, "event packed payload layout");
+    Check((uint)MonoGame.Interop.EventType.DropComplete == 17 &&
+        (uint)MonoGame.Interop.EventType.AndroidLifecycle == 18 &&
+        (uint)MonoGame.Interop.EventType.AppTerminating == 21, "event values were not appended");
+}
 
 static void Check(bool condition, string message)
 {
@@ -277,7 +327,7 @@ static void RegistrationFailure()
 {
     foreach (bool version in new[] { true, false })
     {
-        var api = new FakeApi { Version = version ? 9u : 1u, RegisterStatus = -4 };
+        var api = new FakeApi { Version = version ? 9u : 2u, RegisterStatus = -4 };
         var session = Session(api, () => new FakeGame());
         bool failed = false;
         try { session.Register(); } catch (InvalidOperationException) { failed = true; }
@@ -303,7 +353,7 @@ static void NativeThreadBinding()
 
 sealed class FakeApi : IAndroidNativeHostApi
 {
-    public uint Version = 1;
+    public uint Version = 2;
     public int RegisterStatus;
     private WeakReference<AndroidNativeRunCallback> _callback;
     private IntPtr _function;

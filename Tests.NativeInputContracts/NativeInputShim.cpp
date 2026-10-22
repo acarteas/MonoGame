@@ -3,9 +3,18 @@
 #include "api_MGG.h"
 #include "api_MGA.h"
 #include <cstdio>
+#include <cstdint>
 
-static int creates, destroys, vibrations, graphicsDestroys;
+static int creates, destroys, vibrations, graphicsDestroys, forbiddenDraws;
 static bool desktop;
+static uint32_t lifecycleFlags = 1;
+static uint64_t lifecycleRevision, inputRetireRevision;
+MG_EXPORT void Test_SetLifecycle(uint32_t flags)
+{
+    lifecycleFlags = flags;
+    ++lifecycleRevision;
+    if (flags != 1) { inputRetireRevision = lifecycleRevision; }
+}
 static void (*destroyObserver)();
 static char identifier[32];
 
@@ -16,7 +25,7 @@ MG_EXPORT void Test_Configure(int isDesktop, void (*observer)())
 }
 MG_EXPORT int Test_Count(int counter)
 {
-    return counter == 0 ? creates : counter == 1 ? destroys : counter == 2 ? vibrations : graphicsDestroys;
+    return counter == 0 ? creates : counter == 1 ? destroys : counter == 2 ? vibrations : counter == 3 ? graphicsDestroys : forbiddenDraws;
 }
 MGMonoGamePlatform MGP_Platform_GetPlatform() { return desktop ? MGMonoGamePlatform::DesktopVK : MGMonoGamePlatform::Android; }
 MGGraphicsBackend MGP_Platform_GetGraphicsBackend() { return MGGraphicsBackend::Vulkan; }
@@ -58,3 +67,21 @@ mgbyte MGP_GamePad_SetVibration(MGP_Platform*, mgint, mgfloat, mgfloat, mgfloat,
 MGG_GraphicsSystem* MGG_GraphicsSystem_Create() { return reinterpret_cast<MGG_GraphicsSystem*>(0x400); }
 void MGG_GraphicsSystem_Destroy(MGG_GraphicsSystem*) { ++graphicsDestroys; }
 mgint MGA_System_GetMaxInstances() { return 16; }
+
+MG_EXPORT int MGP_Android_GetLifecycle(uint64_t session, MGP_AndroidLifecycle* snapshot)
+{
+    *snapshot = {};
+    snapshot->SessionId = session == 0 ? 1 : session;
+    snapshot->Generation = 1;
+    snapshot->Flags = lifecycleFlags;
+    snapshot->Revision = lifecycleRevision;
+    snapshot->RetireRevision = inputRetireRevision;
+    return 0;
+}
+
+mgint MGG_GraphicsDevice_BeginFrame(MGG_GraphicsDevice*) { return -1; }
+void MGG_GraphicsDevice_Clear(MGG_GraphicsDevice*, MGClearOptions, Vector4&, mgfloat, mgint) { ++forbiddenDraws; }
+void MGG_GraphicsDevice_Draw(MGG_GraphicsDevice*, MGPrimitiveType, mgint, mgint) { ++forbiddenDraws; }
+
+MG_EXPORT int MGP_Android_AcknowledgeRetired(uint64_t, uint64_t) { return 0; }
+mgbyte MGP_Platform_BeforeDraw(MGP_Platform*) { return lifecycleFlags == 1; }

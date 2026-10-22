@@ -42,4 +42,5 @@ for variant, defines, modes in [
     run(["c++", "-std=c++17", "-shared", "-fPIC", *defines, "-I", root / "native/monogame/include",
          root / "Tests.NativeInputContracts/NativeInputShim.cpp", "-o", shim])
     for mode in modes:
-        run(["dotnet", output / "managed/bin/NativeInputContracts/debug/MonoGame.Framework.Android.Native.dll", shim, mode])
+        run(["flock", "--close", "/tmp/loadedandlocked-keybindings-dotnet-v2.lock", "dotnet",
+             output / "managed/bin/NativeInputContracts/debug/MonoGame.Framework.Android.Native.dll", shim, mode])

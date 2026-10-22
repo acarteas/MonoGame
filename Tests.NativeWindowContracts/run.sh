@@ -22,6 +22,6 @@ for project in Tests.NativeWindowContracts Tests.NativeWindowContracts.Interop; 
         --artifacts-path "$output_root/managed-artifacts"
 done
 managed_bin="$output_root/managed-artifacts/bin"
-dotnet "$managed_bin/Tests.NativeWindowContracts/debug/Tests.NativeWindowContracts.dll" android
-dotnet "$managed_bin/Tests.NativeWindowContracts/debug/Tests.NativeWindowContracts.dll" desktop
-dotnet "$managed_bin/Tests.NativeWindowContracts.Interop/debug/Tests.NativeWindowContracts.Interop.dll"
+flock --close /tmp/loadedandlocked-keybindings-dotnet-v2.lock dotnet "$managed_bin/Tests.NativeWindowContracts/debug/Tests.NativeWindowContracts.dll" android
+flock --close /tmp/loadedandlocked-keybindings-dotnet-v2.lock dotnet "$managed_bin/Tests.NativeWindowContracts/debug/Tests.NativeWindowContracts.dll" desktop
+flock --close /tmp/loadedandlocked-keybindings-dotnet-v2.lock dotnet "$managed_bin/Tests.NativeWindowContracts.Interop/debug/Tests.NativeWindowContracts.Interop.dll"

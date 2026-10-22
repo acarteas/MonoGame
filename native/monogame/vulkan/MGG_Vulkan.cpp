@@ -3,6 +3,9 @@
 // file 'LICENSE.txt', which is part of this source code package.
 
 #include "api_MGG.h"
+#if defined(__ANDROID__)
+#include "../android/surface_lifecycle.h"
+#endif
 
 #include "mg_common.h"
 
@@ -272,6 +275,11 @@ const int SAMPLER_SLOT_BINDING_OFFSET = 48;
 
 struct MGG_GraphicsDevice
 {
+#if defined(__ANDROID__)
+    MGP_Android_SurfaceConsumer androidSurface;
+    bool androidNeedsSwapchain = true;
+    bool androidSurfaceLost = false;
+#endif
 	VkInstance instance = VK_NULL_HANDLE;
 
 	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
@@ -1411,6 +1419,15 @@ MGG_GraphicsDevice* MGG_GraphicsDevice_Create(MGG_GraphicsSystem* system, MGG_Gr
 	assert(adapter != nullptr);
 
 	auto device = new MGG_GraphicsDevice();
+#if defined(__ANDROID__)
+    MGP_Android_Lifecycle lifecycle;
+    if (MGP_Android_GetLifecycle(0, &lifecycle) != MGP_ANDROID_OK)
+    {
+        delete device;
+        return nullptr;
+    }
+    device->androidSurface.SessionId = lifecycle.SessionId;
+#endif
 
 	device->instance = system->instance;
 	device->physicalDevice = adapter->device;
@@ -1820,6 +1837,57 @@ void MGG_GraphicsDevice_GetCaps(MGG_GraphicsDevice* device, MGG_GraphicsDevice_C
 	caps.ShaderProfile = 80;
 }
 
+#if defined(__ANDROID__)
+static bool MGVK_RetireAndroidSurface(MGG_GraphicsDevice* device)
+{
+    std::lock_guard lock(device->queueMutex);
+
+    // All calls are on the owning SDL game thread. Transfers also use this
+    // device; device idle covers them before any swapchain attachment is freed.
+    if (vkDeviceWaitIdle(device->device) != VK_SUCCESS)
+    {
+        MGP_Android_Lifecycle snapshot;
+        if (MGP_Android_GetLifecycle(device->androidSurface.SessionId, &snapshot) == MGP_ANDROID_OK)
+        {
+            uint64_t revision;
+            MGP_Android_PublishLifecycle(snapshot.SessionId, snapshot.Generation,
+                snapshot.Flags | MGP_ANDROID_QUARANTINED | MGP_ANDROID_EXITING, &revision);
+        }
+        return false;
+    }
+    for (auto& frame : device->frames)
+    {
+        if (frame.is_recording)
+        {
+            vkResetCommandBuffer(frame.commandBuffer, 0);
+        }
+        frame.is_recording = false;
+        frame.is_rendering = false;
+        frame.image_index = UINT32_MAX;
+        frame.imageAcquiredPending = false;
+    }
+    device->inRenderPass = false;
+    MGVK_CleanupSwapChain(device);
+    if (device->surface != VK_NULL_HANDLE)
+    {
+        vkDestroySurfaceKHR(device->instance, device->surface, nullptr);
+        device->surface = VK_NULL_HANDLE;
+    }
+    device->androidNeedsSwapchain = true;
+    return true;
+}
+
+static bool MGVK_ApplyAndroidLifecycle(MGG_GraphicsDevice* device)
+{
+    MGP_Android_Lifecycle lifecycle;
+    if (MGP_Android_GetLifecycle(device->androidSurface.SessionId, &lifecycle) != MGP_ANDROID_OK)
+    {
+        return false;
+    }
+    return device->androidSurface.Apply(lifecycle, [device] { return MGVK_RetireAndroidSurface(device); });
+}
+#endif
+
 void MGVK_RecreateSwapChain(
 	MGG_GraphicsDevice* device,
 	void* nativeWindowHandle,
@@ -1833,16 +1901,59 @@ void MGVK_RecreateSwapChain(
 	assert(device != nullptr);
 	assert(nativeWindowHandle != nullptr);
 
-	vkDeviceWaitIdle(device->device);
+#if defined(__ANDROID__)
+    if (device->window != nullptr && device->window != nativeWindowHandle &&
+        !MGVK_RetireAndroidSurface(device))
+    {
+        return;
+    }
+    device->androidNeedsSwapchain = device->androidNeedsSwapchain ||
+        device->swapchainWidth != width || device->swapchainHeight != height ||
+        device->colorFormat != vkColor || device->depthFormat != vkDepth ||
+        device->multiSampleCount != multiSampleCount || device->syncInterval != syncInterval;
+    device->window = static_cast<SDL_Window*>(nativeWindowHandle);
+    device->swapchainWidth = width;
+    device->swapchainHeight = height;
+    device->colorFormat = vkColor;
+    device->depthFormat = vkDepth;
+    device->multiSampleCount = multiSampleCount;
+    device->syncInterval = syncInterval;
+    if (!MGVK_ApplyAndroidLifecycle(device))
+    {
+        return;
+    }
+#endif
+#if defined(__ANDROID__)
 
+    // vkDeviceWaitIdle externally synchronizes every queue, including transfers.
+    // Retirement/resize never takes transferMutex while owning queueMutex.
+    std::lock_guard lock(device->queueMutex);
+    if (vkDeviceWaitIdle(device->device) != VK_SUCCESS)
+    {
+        MGP_Android_Lifecycle snapshot;
+        if (MGP_Android_GetLifecycle(device->androidSurface.SessionId, &snapshot) == MGP_ANDROID_OK)
+        {
+            uint64_t revision;
+            MGP_Android_PublishLifecycle(snapshot.SessionId, snapshot.Generation,
+                snapshot.Flags | MGP_ANDROID_QUARANTINED | MGP_ANDROID_EXITING, &revision);
+        }
+        return;
+    }
+#else
+	vkDeviceWaitIdle(device->device);
 	std::lock_guard lock(device->queueMutex);
+#endif
 
 	VkResult res;
 
 	// Create the surface.
 #if defined(MG_SDL2)
 	auto sdl_window = (SDL_Window*)nativeWindowHandle;
-	if (sdl_window != device->window)
+	if (sdl_window != device->window
+#if defined(__ANDROID__)
+        || device->surface == VK_NULL_HANDLE
+#endif
+    )
 	{
 		MGVK_CleanupSwapChain(device);
 
@@ -1881,13 +1992,25 @@ void MGVK_RecreateSwapChain(
 		vkDepth == device->depthFormat &&
 		syncInterval == device->syncInterval &&
 		multiSampleCount == device->multiSampleCount &&
-		device->swapchain != VK_NULL_HANDLE)
+		device->swapchain != VK_NULL_HANDLE
+#if defined(__ANDROID__)
+        && !device->androidNeedsSwapchain
+#endif
+    )
 		return;
 
 	MGVK_CleanupSwapChain(device);
 
 	VkSurfaceCapabilitiesKHR surface_capabilities;
 	res = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device->physicalDevice, device->surface, &surface_capabilities);
+#if defined(__ANDROID__)
+    if (res == VK_ERROR_SURFACE_LOST_KHR || res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR)
+    {
+        device->androidSurfaceLost = res == VK_ERROR_SURFACE_LOST_KHR;
+        device->androidNeedsSwapchain = true;
+        return;
+    }
+#endif
 	VK_CHECK_RESULT(res);
 
 	// If max extent is zero'd, it means the window is minimized, and we should leave the swapchain to VK_NULL_HANDLE and stop rendering (this is done in MGP_Platform_BeforeDraw()).
@@ -1926,10 +2049,26 @@ void MGVK_RecreateSwapChain(
 	{
 		uint32_t format_count = 0;
 		res = vkGetPhysicalDeviceSurfaceFormatsKHR(device->physicalDevice, device->surface, &format_count, nullptr);
+#if defined(__ANDROID__)
+        if (res == VK_ERROR_SURFACE_LOST_KHR || res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR)
+        {
+            device->androidSurfaceLost = res == VK_ERROR_SURFACE_LOST_KHR;
+            device->androidNeedsSwapchain = true;
+            return;
+        }
+#endif
 		VK_CHECK_RESULT(res);
 
 		std::vector<VkSurfaceFormatKHR> surfFormats(format_count);
 		res = vkGetPhysicalDeviceSurfaceFormatsKHR(device->physicalDevice, device->surface, &format_count, surfFormats.data());
+#if defined(__ANDROID__)
+        if (res == VK_ERROR_SURFACE_LOST_KHR || res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR)
+        {
+            device->androidSurfaceLost = res == VK_ERROR_SURFACE_LOST_KHR;
+            device->androidNeedsSwapchain = true;
+            return;
+        }
+#endif
 		VK_CHECK_RESULT(res);
 
 	RETRY_SURFACE_FORMAT_SEARCH:
@@ -1987,10 +2126,26 @@ void MGVK_RecreateSwapChain(
 	// Query supported present modes and select the best one
 	uint32_t presentModeCount = 0;
 	res = vkGetPhysicalDeviceSurfacePresentModesKHR(device->physicalDevice, device->surface, &presentModeCount, nullptr);
+#if defined(__ANDROID__)
+    if (res == VK_ERROR_SURFACE_LOST_KHR || res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR)
+    {
+        device->androidSurfaceLost = res == VK_ERROR_SURFACE_LOST_KHR;
+        device->androidNeedsSwapchain = true;
+        return;
+    }
+#endif
 	VK_CHECK_RESULT(res);
 	
 	std::vector<VkPresentModeKHR> presentModes(presentModeCount);
 	res = vkGetPhysicalDeviceSurfacePresentModesKHR(device->physicalDevice, device->surface, &presentModeCount, presentModes.data());
+#if defined(__ANDROID__)
+    if (res == VK_ERROR_SURFACE_LOST_KHR || res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR)
+    {
+        device->androidSurfaceLost = res == VK_ERROR_SURFACE_LOST_KHR;
+        device->androidNeedsSwapchain = true;
+        return;
+    }
+#endif
 	VK_CHECK_RESULT(res);
 	
 	// Prefer MAILBOX -> IMMEDIATE -> FIFO (FIFO is always supported)
@@ -2040,6 +2195,14 @@ void MGVK_RecreateSwapChain(
 		create_info.minImageCount = std::min(create_info.minImageCount, surface_capabilities.maxImageCount);
 
 	res = vkCreateSwapchainKHR(device->device, &create_info, nullptr, &device->swapchain);
+#if defined(__ANDROID__)
+    if (res == VK_ERROR_SURFACE_LOST_KHR || res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR)
+    {
+        device->androidSurfaceLost = res == VK_ERROR_SURFACE_LOST_KHR;
+        device->androidNeedsSwapchain = true;
+        return;
+    }
+#endif
 	VK_CHECK_RESULT(res);
 	VK_SET_OBJECT_NAME(device->device, device->swapchain, VK_OBJECT_TYPE_SWAPCHAIN_KHR, "MGG_GraphicsDevice.swapchain");
 
@@ -2207,11 +2370,22 @@ void MGVK_RecreateSwapChain(
 		VK_CHECK_RESULT(res);
 		VK_SET_OBJECT_NAME(device->device, frame.imageAcquiredSemaphore, VK_OBJECT_TYPE_SEMAPHORE, "MGVK_Frame.imageAcquiredSemaphore");
 	}
+#if defined(__ANDROID__)
+    device->androidNeedsSwapchain = false;
+    device->androidSurfaceLost = false;
+#endif
 }
 
 void MGVK_RecreateSwapChain(MGG_GraphicsDevice* device)
 {
+#if defined(__ANDROID__)
+    if (!MGVK_RetireAndroidSurface(device))
+    {
+        return;
+    }
+#else
 	MGVK_CleanupSwapChain(device);
+#endif
 
 	if (device->window == nullptr)
 	{
@@ -2264,7 +2438,9 @@ void MGG_GraphicsDevice_ResizeSwapchain(
 
 	MGVK_RecreateSwapChain(device, nativeWindowHandle, width, height, vkColor, vkDepth, multiSampleCount, syncInterval);
 
+#if !defined(__ANDROID__)
 	MGVK_PrepareFrame(device);
+#endif
 }
 
 
@@ -2318,7 +2494,7 @@ void MGVK_BeginCommandBuffer(VkCommandBuffer commandBuffer)
 	//vkCmdSetDepthClampEnableEXT(commandBuffer, VK_TRUE);
 }
 
-void MGVK_TryAcquireSwap(MGG_GraphicsDevice* device, MGVK_Frame& frame)
+bool MGVK_TryAcquireSwap(MGG_GraphicsDevice* device, MGVK_Frame& frame)
 {
 	VkResult res;
 
@@ -2333,15 +2509,48 @@ void MGVK_TryAcquireSwap(MGG_GraphicsDevice* device, MGVK_Frame& frame)
 	// Do we need to get the next swapchain image?
 	if (device->swapchain != VK_NULL_HANDLE && frame.image_index == -1)
 	{
-		res = vkAcquireNextImageKHR(device->device, device->swapchain, UINT64_MAX,
+		res = vkAcquireNextImageKHR(device->device, device->swapchain,
+#if defined(__ANDROID__)
+            UINT64_C(10000000),
+#else
+            UINT64_MAX,
+#endif
 			frame.imageAcquiredSemaphore, VK_NULL_HANDLE, &frame.image_index);
+#if defined(__ANDROID__)
+        if (res == VK_TIMEOUT || res == VK_NOT_READY)
+        {
+            frame.image_index = UINT32_MAX;
+            return false;
+        }
+        if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_ERROR_SURFACE_LOST_KHR)
+        {
+            frame.image_index = UINT32_MAX;
+            device->androidSurfaceLost = res == VK_ERROR_SURFACE_LOST_KHR;
+            device->androidNeedsSwapchain = true;
+            return false;
+        }
+        if (res == VK_SUBOPTIMAL_KHR)
+        {
+            device->androidNeedsSwapchain = true;
+        }
+        else
+#endif
 		VK_CHECK_RESULT(res);
 		frame.imageAcquiredPending = true;
 	}
 
-	// This should be cleared by now.
+#if !defined(__ANDROID__)
+
+	// Android resets only immediately before a guaranteed submit. An acquired
+    // frame abandoned for lifecycle retirement must never leave a waitable fence.
 	res = vkResetFences(device->device, 1, &frame.completedFence);
 	VK_CHECK_RESULT(res);
+#endif
+#if defined(__ANDROID__)
+    return device->swapchain != VK_NULL_HANDLE && frame.image_index != UINT32_MAX;
+#else
+    return true;
+#endif
 }
 
 void MGVK_PrepareFrame(MGG_GraphicsDevice* device)
@@ -2350,7 +2559,10 @@ void MGVK_PrepareFrame(MGG_GraphicsDevice* device)
 
 	// This is only here for the first frame or for after the
 	// swapchain is resized...  normally this occurs on Present.
-	MGVK_TryAcquireSwap(device, frame);
+    if (!MGVK_TryAcquireSwap(device, frame))
+    {
+        return;
+    }
 
 	// Cleanup resources from the last time this frame was rendered.
 	MGVK_ProcessDescriptorCaches(device, device->frame);
@@ -2378,11 +2590,57 @@ void MGVK_PrepareFrame(MGG_GraphicsDevice* device)
 	MGG_GraphicsDevice_SetRenderTargets(device, nullptr, nullptr, 0);
 }
 
+#if defined(__ANDROID__)
+mgbyte MGG_GraphicsDevice_ProcessAndroidLifecycle(MGG_GraphicsDevice* device, mgbyte prepare)
+{
+    if (!MGVK_ApplyAndroidLifecycle(device))
+    {
+        return false;
+    }
+    if (!prepare)
+    {
+
+        // Lifecycle retirement may have discarded a recording frame even when
+        // the latest state is already ready again. Clear the managed cached
+        // frame token unless a native command buffer still owns that recording.
+        return !device->frames.empty() && device->frames[device->frameIndex].is_recording;
+    }
+    if (device->androidSurfaceLost)
+    {
+        if (!MGVK_RetireAndroidSurface(device))
+        {
+            return false;
+        }
+        device->androidSurfaceLost = false;
+    }
+    if (device->androidNeedsSwapchain || device->swapchain == VK_NULL_HANDLE)
+    {
+        MGVK_RecreateSwapChain(device, device->window, device->swapchainWidth,
+            device->swapchainHeight, device->colorFormat, device->depthFormat,
+            device->multiSampleCount, device->syncInterval);
+    }
+    if (device->swapchain == VK_NULL_HANDLE || !MGVK_ApplyAndroidLifecycle(device))
+    {
+        return false;
+    }
+    if (!device->frames[device->frameIndex].is_recording)
+    {
+        MGVK_PrepareFrame(device);
+    }
+    return device->frames[device->frameIndex].is_recording;
+}
+#endif
+
 mgint MGG_GraphicsDevice_BeginFrame(MGG_GraphicsDevice* device)
 {
 	assert(device != nullptr);
 
-	// We do nothing here... everything is handled in Present().
+#if defined(__ANDROID__)
+    if (!MGG_GraphicsDevice_ProcessAndroidLifecycle(device, true))
+    {
+        return -1;
+    }
+#endif
 	return device->frameIndex;
 }
 
@@ -2687,6 +2945,14 @@ void MGG_GraphicsDevice_Present(MGG_GraphicsDevice* device, mgint currentFrame, 
 	assert(device != nullptr);
 	assert(syncInterval >= 0);
 	assert(currentFrame >= 0);
+
+#if defined(__ANDROID__)
+    if (!MGVK_ApplyAndroidLifecycle(device) || device->swapchain == VK_NULL_HANDLE ||
+        device->frames.empty() || !device->frames[device->frameIndex].is_recording)
+    {
+        return;
+    }
+#endif
 	assert((device->frame % device->swapchainCount) == currentFrame);
 
 
@@ -2719,6 +2985,10 @@ void MGG_GraphicsDevice_Present(MGG_GraphicsDevice* device, mgint currentFrame, 
 		submitInfo.pCommandBuffers = &frame.commandBuffer;
 		submitInfo.signalSemaphoreCount = 1;
 		submitInfo.pSignalSemaphores = &swap.renderCompleteSemaphore;
+#if defined(__ANDROID__)
+        res = vkResetFences(device->device, 1, &frame.completedFence);
+        VK_CHECK_RESULT(res);
+#endif
 		res = vkQueueSubmit(device->queue, 1, &submitInfo, frame.completedFence);
 		VK_CHECK_RESULT(res);
 		frame.imageAcquiredPending = false;
@@ -2743,8 +3013,16 @@ void MGG_GraphicsDevice_Present(MGG_GraphicsDevice* device, mgint currentFrame, 
 		MGVK_CleanupPendingTransfers(device);
 	}
 
-	if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR)
+	if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR
+#if defined(__ANDROID__)
+        || res == VK_ERROR_SURFACE_LOST_KHR
+#endif
+    )
 	{
+#if defined(__ANDROID__)
+        device->androidSurfaceLost = res == VK_ERROR_SURFACE_LOST_KHR;
+        device->androidNeedsSwapchain = true;
+#else
 		// This will happen if the window is minimized too.
 
 		if (res == VK_SUBOPTIMAL_KHR)
@@ -2756,6 +3034,7 @@ void MGG_GraphicsDevice_Present(MGG_GraphicsDevice* device, mgint currentFrame, 
 				
 		if (device->swapchain == VK_NULL_HANDLE)
 			printf("Couldn't recreate swapchain!\n");
+#endif
 	}
 	else
 	{
@@ -2791,9 +3070,11 @@ void MGG_GraphicsDevice_Present(MGG_GraphicsDevice* device, mgint currentFrame, 
 		++device->frame;
 		device->frameIndex = device->frame % device->swapchainCount;
 
-		// Get the next swap frame here so that any blocking
-		// waiting for the GPU to finish occurs during Present.
+#if !defined(__ANDROID__)
+
+		// Desktop keeps its speculative next-frame acquisition.
 		MGVK_PrepareFrame(device);
+#endif
 	}
 }
 

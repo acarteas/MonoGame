@@ -7,11 +7,14 @@ using Org.Libsdl.App;
 
 namespace Microsoft.Xna.Framework;
 
-// This only admits the current activity's real SDL callbacks. Surface generation,
-// invalidation and recovery remain independent of this peer-ownership boundary.
+// The Activity owns the lifecycle barrier; this is its one SDL surface path.
 internal sealed class AndroidNativeSdlSurface : SDLSurface
 {
     internal Func<bool> IsCurrentOwner { private get; set; }
+    internal Func<bool> Created { private get; set; }
+    internal Action<bool> Changed { private get; set; }
+    internal Func<bool> Destroying { private get; set; }
+    internal Action Destroyed { private get; set; }
 
     public AndroidNativeSdlSurface(Context context) : base(context) { }
 
@@ -19,19 +22,27 @@ internal sealed class AndroidNativeSdlSurface : SDLSurface
 
     public override void SurfaceCreated(ISurfaceHolder holder)
     {
-        if (IsOwner) { base.SurfaceCreated(holder); }
+        if (IsOwner && Created?.Invoke() == true)
+        {
+            base.SurfaceCreated(holder);
+        }
     }
 
     public override void SurfaceChanged(ISurfaceHolder holder, Format format, int width, int height)
     {
-        if (IsOwner) { base.SurfaceChanged(holder, format, width, height); }
+        if (IsOwner)
+        {
+            base.SurfaceChanged(holder, format, width, height);
+            Changed?.Invoke(MIsSurfaceReady);
+        }
     }
 
     public override void SurfaceDestroyed(ISurfaceHolder holder)
     {
-        if (IsOwner)
+        if (Destroying?.Invoke() == true)
         {
             base.SurfaceDestroyed(holder);
+            Destroyed?.Invoke();
         }
         else
         {

@@ -297,6 +297,10 @@ enum class MGEventType : mguint
     ControllerStateChange = 15,
     DropFile = 16,
     DropComplete = 17,
+    AndroidLifecycle = 18,
+    AppBackground = 19,
+    AppForeground = 20,
+    AppTerminating = 21,
 };
 
 enum class MGKeys : mgint

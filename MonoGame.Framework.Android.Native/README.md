@@ -99,8 +99,9 @@ checkpoint on the emitting thread. Snapshots include session ID, managed and
 native UI/game thread IDs, stage, cancellation, callback/root state, result and
 failure details. Every checkpoint is also JSON logged with tag `LAL.AndroidVK`.
 Observer/formatting failures are contained, including the final Cdecl callback
-boundary. These startup diagnostics do not report a surface generation; real
-generation tracking belongs to the surface-lifecycle implementation.
+boundary. `SurfaceLifecycle` and `OnSurfaceLifecycleChanged` separately expose
+immutable real holder generation/readiness and application paused/exiting state.
+Observers may run on the game or UI thread; `Observation` orders their snapshots.
 
 The activity gates every SDL state-mutating instance entrypoint: library loading;
 start/resume/pause/stop/destroy and their SDL thread helpers; focus, configuration,
@@ -112,8 +113,48 @@ The bound SDL surface also admits surface, input and sensor callbacks only while
 its activity owns SDL. Initial real callbacks during base `OnCreate` remain
 admitted before managed registration. Late callbacks after native quit only stop
 that old view's sensors; they never call native SDL or mutate a replacement
-session. This guard preserves current-owner base callback order and does not
-implement generation tracking or surface recovery.
+session. The same surface path also checks active view identity, including old
+views from the same Activity. Generation advances only on real `SurfaceCreated`;
+`SurfaceChanged` publishes readiness only after SDL has accepted its dimensions.
+The initial SDL thread publishes SDL's observed ready state before managed entry.
+
+The native host ABI is version 2. Its 48-byte fixed-width lifecycle snapshot uses
+64-bit session, generation, revision, retirement and acknowledgment values plus
+32-bit flags/reserved (offsets 40/44). Native framework consumers bind the current
+session on the owning SDL game thread once, then use its explicit ID for all later
+queries and acknowledgments. Android lifecycle events append values 18..21 to the
+existing event ABI; its packed payload remains at offset 12. C/C++ and managed
+layout tests cover the 60-byte event and 48-byte snapshot.
+
+Android sets `SDL_HINT_ANDROID_BLOCK_ON_PAUSE=0` before SDL video initialization.
+The UI closes draw admission before invoking SDL's native surface-destroy path,
+then waits at most 1500 ms for that exact session/revision's acknowledgment. The
+game checkpoint abandons unsubmitted recording, quiesces GPU work, destroys the
+swapchain and `VkSurfaceKHR`, and acknowledges without holding a host mutex across
+SDL, JNI or Vulkan calls. The UI never asks the game to perform UI work. Failure
+quarantines the session instead of releasing its native window or Java/JNI state;
+quarantine survives callback completion and rejects native Clear/new owners.
+Disposal failures publish quarantine before returning to native SDL_main, which
+skips SDL_Quit and automatic acknowledgment for that unsafe session.
+
+Recreation checks observed holder generation even if `SDL_Window*` is unchanged.
+Acquisition uses a finite 10 ms timeout on Android; surface-lost/out-of-date and
+suboptimal outcomes schedule one recreation attempt per draw checkpoint. Deferred
+frames preserve managed dirty state; paused/unready frames do not acquire or
+present. Desktop preparation, resize and present behavior retain their existing
+paths. Deactivation neutralizes held keyboard/mouse/touch/controller state without
+retiring controller identity or the owner-qualified session handle. Each consumer
+remembers its last consumed retirement revision, so a pause/resume coalesced before
+the next game tick still neutralizes held input. On that new revision Android SDL
+polling drops queued held-input changes (including managed text fragments) before
+forwarding input again; controller add/remove, window, lifecycle and unrelated
+events are retained. Unchanged ready checkpoints preserve fresh input.
+
+Debug alone exposes protected `Task<bool> RecreateSurfaceForDiagnostics()`. It
+removes and reattaches the real SDL view on the UI thread and completes only after
+real destruction and a newer ready holder callback, with a four-second failure
+deadline. Each posted phase validates the captured session/view/request. Release
+has no helper or exported automation endpoint.
 
 Focused host tests exercise the actual platform-independent session and ownership
 code, plus the Native framework's thread queue:

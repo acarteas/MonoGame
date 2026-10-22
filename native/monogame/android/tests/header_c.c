@@ -1,5 +1,10 @@
 // Compile the public ABI as C as well as C++ and check fixed-width signatures.
 #include "api_MGP_Android.h"
+#include <stddef.h>
+
+_Static_assert(sizeof(MGP_Android_Lifecycle) == 48, "lifecycle size");
+_Static_assert(offsetof(MGP_Android_Lifecycle, Flags) == 40, "flags offset");
+_Static_assert(offsetof(MGP_Android_Lifecycle, Reserved) == 44, "reserved offset");
 
 _Static_assert(sizeof(uint64_t) == 8, "session width");
 _Static_assert(sizeof(int32_t) == 4, "status/callback result width");

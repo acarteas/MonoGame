@@ -125,6 +125,25 @@ public partial class GraphicsDevice
         }
     }
 
+    internal unsafe bool AndroidLifecycleCheckpoint(bool prepare)
+    {
+        if (prepare)
+        {
+
+            // BeginFrame performs the single native prepare/acquire attempt.
+            // Calling the native prepare hook twice could immediately discard
+            // an image acquired with SUBOPTIMAL before that frame is submitted.
+            BeginFrame();
+            return _currentFrame >= 0;
+        }
+        if (MGG.GraphicsDevice_ProcessAndroidLifecycle(Handle, 0) == 0)
+        {
+            _currentFrame = -1;
+            return false;
+        }
+        return true;
+    }
+
     private unsafe void BeginFrame()
     {
         if (_currentFrame > -1)
@@ -132,6 +151,10 @@ public partial class GraphicsDevice
 
         // Start the command buffer now.
         _currentFrame = MGG.GraphicsDevice_BeginFrame(Handle);
+        if (_currentFrame < 0)
+        {
+            return;
+        }
 
         // We must reapply all the state on a new command buffer.
         _scissorRectangleDirty = true;
@@ -161,7 +184,10 @@ public partial class GraphicsDevice
     private unsafe void PlatformClear(ClearOptions options, Vector4 color, float depth, int stencil)
     {
         BeginFrame();
-
+        if (_currentFrame < 0)
+        {
+            return;
+        }
         PlatformBeginApplyState();
         MGG.GraphicsDevice_Clear(Handle, options, ref color, depth, stencil);
     }
@@ -206,6 +232,10 @@ public partial class GraphicsDevice
     private unsafe void PlatformSetViewport(ref Viewport viewport)
     {
         BeginFrame();
+        if (_currentFrame < 0)
+        {
+            return;
+        }
 
         MGG.GraphicsDevice_SetViewport(
             Handle,
@@ -220,6 +250,10 @@ public partial class GraphicsDevice
     private unsafe void PlatformApplyDefaultRenderTarget()
     {
         BeginFrame();
+        if (_currentFrame < 0)
+        {
+            return;
+        }
 
         _viewport = new Viewport(
             0,
@@ -240,12 +274,20 @@ public partial class GraphicsDevice
 
     private unsafe void PlatformResolveRenderTargets()
     {
+        if (PlatformInfo.MonoGamePlatform == MonoGamePlatform.Android && _currentFrame < 0)
+        {
+            return;
+        }
         MGG.GraphicsDevice_ResolveRenderTargets(Handle);
     }
 
     private unsafe IRenderTarget PlatformApplyRenderTargets()
     {
         BeginFrame();
+        if (_currentFrame < 0)
+        {
+            return null;
+        }
 
         Array.Clear(_curRenderTargets, 0, 4);
 
@@ -456,6 +498,11 @@ public partial class GraphicsDevice
 
     private unsafe void PlatformDrawIndexedPrimitives(PrimitiveType primitiveType, int baseVertex, int startIndex, int primitiveCount)
     {
+        BeginFrame();
+        if (_currentFrame < 0)
+        {
+            return;
+        }
         ApplyState(true);
         if (baseVertex < 0)
             baseVertex = 0;
@@ -467,6 +514,11 @@ public partial class GraphicsDevice
 
     private unsafe  void PlatformDrawUserPrimitives<T>(PrimitiveType primitiveType, T[] vertexData, int vertexOffset, VertexDeclaration vertexDeclaration, int vertexCount) where T : struct
     {
+        BeginFrame();
+        if (_currentFrame < 0)
+        {
+            return;
+        }
         var startVertex = SetUserVertexBuffer(vertexData, vertexOffset, vertexCount, vertexDeclaration);
         ApplyState(true);
 
@@ -475,6 +527,11 @@ public partial class GraphicsDevice
 
     private unsafe void PlatformDrawPrimitives(PrimitiveType primitiveType, int vertexStart, int vertexCount)
     {
+        BeginFrame();
+        if (_currentFrame < 0)
+        {
+            return;
+        }
         ApplyState(true);
         if (vertexStart < 0)
             vertexStart = 0;
@@ -484,6 +541,11 @@ public partial class GraphicsDevice
 
     private unsafe void PlatformDrawUserIndexedPrimitives<T>(PrimitiveType primitiveType, T[] vertexData, int vertexOffset, int numVertices, short[] indexData, int indexOffset, int primitiveCount, VertexDeclaration vertexDeclaration) where T : struct
     {
+        BeginFrame();
+        if (_currentFrame < 0)
+        {
+            return;
+        }
         var indexCount = GetElementCountArray(primitiveType, primitiveCount);
         var startVertex = SetUserVertexBuffer(vertexData, vertexOffset, numVertices, vertexDeclaration);
         var startIndex = SetUserIndexBuffer(indexData, indexOffset, indexCount);
@@ -494,6 +556,11 @@ public partial class GraphicsDevice
 
     private unsafe void PlatformDrawUserIndexedPrimitives<T>(PrimitiveType primitiveType, T[] vertexData, int vertexOffset, int numVertices, int[] indexData, int indexOffset, int primitiveCount, VertexDeclaration vertexDeclaration) where T : struct
     {
+        BeginFrame();
+        if (_currentFrame < 0)
+        {
+            return;
+        }
         var indexCount = GetElementCountArray(primitiveType, primitiveCount);
         var startVertex = SetUserVertexBuffer(vertexData, vertexOffset, numVertices, vertexDeclaration);
         var startIndex = SetUserIndexBuffer(indexData, indexOffset, indexCount);
@@ -504,6 +571,11 @@ public partial class GraphicsDevice
 
     private unsafe void PlatformDrawInstancedPrimitives(PrimitiveType primitiveType, int baseVertex, int startIndex, int primitiveCount, int baseInstance, int instanceCount)
     {
+        BeginFrame();
+        if (_currentFrame < 0)
+        {
+            return;
+        }
         ApplyState(true);
 
         MGG.GraphicsDevice_DrawIndexedInstanced(Handle, primitiveType, primitiveCount, startIndex, baseVertex, instanceCount);

@@ -37,6 +37,20 @@ static partial class GamePad
     internal static unsafe bool OwnsNativePlatform(object owner, MGP_Platform* handle)
         => handle != null && ReferenceEquals(_nativePlatformOwner, owner) && _nativePlatformHandle == handle;
 
+    internal static unsafe void NeutralizeNativePlatformInput(object owner, MGP_Platform* handle)
+    {
+        if (!OwnsNativePlatform(owner, handle))
+        {
+            return;
+        }
+        foreach (var state in _stateById.Values)
+        {
+            state.Buttons = Buttons.None;
+            state.ThumbstickL = state.ThumbstickR = Vector2.Zero;
+            state.TriggerL = state.TriggerR = 0;
+        }
+    }
+
     internal static unsafe bool ClearNativePlatformInput(object owner, MGP_Platform* handle)
     {
         if (!OwnsNativePlatform(owner, handle))

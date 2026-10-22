@@ -33,7 +33,9 @@ for header in (script.parent / "include").glob("api_*.h"):
 baseline_unimplemented = {"MGP_Platform_StartRunLoop"}
 expected -= baseline_unimplemented
 startup_exports = {"SDL_main", "MGP_Android_GetHostApiVersion",
-                   "MGP_Android_RegisterRunCallback", "MGP_Android_ClearRunCallback"}
+                   "MGP_Android_RegisterRunCallback", "MGP_Android_ClearRunCallback",
+                   "MGP_Android_PublishLifecycle", "MGP_Android_GetLifecycle",
+                   "MGP_Android_AcknowledgeRetired", "MGP_Android_WaitRetired"}
 expected |= startup_exports
 missing = expected - exports
 if missing:
@@ -73,7 +75,7 @@ manifest["exports"] = {"expected": sorted(expected), "verifiedCount": len(expect
                        "baselineUnimplementedDeclarations": sorted(baseline_unimplemented - exports),
                        "allNativeApi": sorted(name for name in exports if name.startswith(("MGP_", "MGG_", "MGA_", "MGI_", "MGM_", "MG_Asset_")))}
 manifest["androidHost"] = {
-    "apiVersion": 1, "callingConvention": "Cdecl",
+    "apiVersion": 2, "callingConvention": "Cdecl",
     "sessionArgument": "--mgp-android-session=",
     "sessionIds": "nonzero strictly increasing uint64 for loaded-library lifetime",
     "inputs": {name: entry(path) for name, path in {

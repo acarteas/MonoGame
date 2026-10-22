@@ -21,6 +21,16 @@ static int drawableQueries = 0;
 static SDL_Event nextEvent;
 static bool eventPending = false;
 static Uint32 windowFlags = 0;
+static int inputFilters = 0;
+#if TEST_ANDROID
+static MGP_Android_Lifecycle lifecycle{500, 1, 0, 0, 0, MGP_ANDROID_SURFACE_READY, 0};
+int32_t MGP_ANDROID_CALL MGP_Android_GetLifecycle(uint64_t sessionId, MGP_Android_Lifecycle* snapshot)
+{
+    assert(sessionId == 500);
+    *snapshot = lifecycle;
+    return MGP_ANDROID_OK;
+}
+#endif
 
 extern "C" {
 SDL_Window* SDL_CreateWindow(const char*, int, int, int, int, Uint32) { return reinterpret_cast<SDL_Window*>(1); }
@@ -41,6 +51,11 @@ void SDL_SetWindowBordered(SDL_Window*, SDL_bool) { ++desktopCalls; }
 void SDL_SetWindowTitle(SDL_Window*, const char*) { ++desktopCalls; }
 void SDL_SetWindowSize(SDL_Window*, int width, int height) { ++desktopCalls; windowWidth = width; windowHeight = height; }
 void SDL_WarpMouseInWindow(SDL_Window*, int, int) { ++desktopCalls; }
+void SDL_FilterEvents(SDL_EventFilter filter, void* data)
+{
+    ++inputFilters;
+    if (eventPending && !filter(data, &nextEvent)) { eventPending = false; }
+}
 int SDL_PollEvent(SDL_Event* event)
 {
     if (!eventPending) { return 0; }
@@ -67,6 +82,9 @@ int main()
     assert(MGP_Platform_GetGraphicsBackend() == MGGraphicsBackend::Vulkan);
 
     MGP_Platform platform;
+#if TEST_ANDROID
+    platform.sessionId = lifecycle.SessionId;
+#endif
     int width = 800, height = 480;
     auto window = MGP_Window_Create(&platform, width, height, "Contract test");
 #if TEST_ANDROID
@@ -123,6 +141,57 @@ int main()
         assert(event.Window.Data1 == 720 && event.Window.Data2 == 333);
 #endif
     }
+#if TEST_ANDROID
+    assert(MGP_Platform_BeforeDraw(&platform));
+    lifecycle.Flags = MGP_ANDROID_SURFACE_READY | MGP_ANDROID_PAUSED;
+    assert(!MGP_Platform_BeforeDraw(&platform));
+    lifecycle.Flags = 0;
+    assert(!MGP_Platform_BeforeDraw(&platform));
+    lifecycle.Flags = MGP_ANDROID_SURFACE_READY;
+    assert(MGP_Platform_BeforeDraw(&platform));
+    for (auto kind : {SDL_KEYDOWN, SDL_MOUSEBUTTONDOWN, SDL_CONTROLLERAXISMOTION})
+    {
+        nextEvent = {};
+        nextEvent.type = kind;
+        eventPending = true;
+        lifecycle.RetireRevision = ++lifecycle.Revision;
+        MGP_Event text{};
+        text.Type = MGEventType::TextInput;
+        platform.queued_events.push(text);
+        MGP_Event moved{};
+        moved.Type = MGEventType::WindowMoved;
+        platform.queued_events.push(moved);
+        MGP_Event event;
+        assert(MGP_Platform_PollEvent(&platform, event) && event.Type == MGEventType::AndroidLifecycle);
+        assert(!eventPending && platform.queued_events.size() == 1);
+        int filters = inputFilters;
+        assert(MGP_Platform_PollEvent(&platform, event) && event.Type == MGEventType::WindowMoved);
+        assert(inputFilters == filters);
+    }
+
+    // A retirement boundary preserves unrelated native queued events. The next
+    // unchanged ready checkpoint must forward newly received input normally.
+    nextEvent = {};
+    nextEvent.type = SDL_WINDOWEVENT;
+    nextEvent.window.windowID = 42;
+    nextEvent.window.event = SDL_WINDOWEVENT_SIZE_CHANGED;
+    eventPending = true;
+    lifecycle.RetireRevision = ++lifecycle.Revision;
+    MGP_Event event;
+    assert(MGP_Platform_PollEvent(&platform, event) && event.Type == MGEventType::AndroidLifecycle);
+    assert(eventPending);
+    assert(MGP_Platform_PollEvent(&platform, event) && event.Type == MGEventType::WindowResized);
+    nextEvent = {};
+    nextEvent.type = SDL_MOUSEBUTTONDOWN;
+    nextEvent.button.windowID = 42;
+    nextEvent.button.button = SDL_BUTTON_LEFT;
+    eventPending = true;
+    int filters = inputFilters;
+    assert(MGP_Platform_PollEvent(&platform, event) && event.Type == MGEventType::MouseButtonDown);
+    assert(inputFilters == filters);
+#else
+    assert(inputFilters == 0);
+#endif
     MGP_Window_Destroy(window);
     puts(TEST_ANDROID ? "Android SDL window contracts passed (host doubles)" : "Desktop Vulkan SDL window contracts passed (host doubles)");
 }

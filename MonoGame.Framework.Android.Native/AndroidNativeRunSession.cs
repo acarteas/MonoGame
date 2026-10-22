@@ -77,9 +77,9 @@ internal sealed class AndroidNativeRunSession
     {
         try
         {
-            if (_api.GetVersion() != 1)
+            if (_api.GetVersion() != 2)
             {
-                throw new InvalidOperationException("MonoGame Android host API version 1 is required.");
+                throw new InvalidOperationException("MonoGame Android host API version 2 is required.");
             }
 
             lock (_gate)
