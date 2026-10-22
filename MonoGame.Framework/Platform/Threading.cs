@@ -72,6 +72,13 @@ namespace Microsoft.Xna.Framework
         }
 #endif
 
+#if NATIVE
+        internal static void BindNativeGameThread()
+        {
+            _mainThreadId = Thread.CurrentThread.ManagedThreadId;
+        }
+#endif
+
         /// <summary>
         /// Checks if the code is currently running on the UI thread.
         /// </summary>
