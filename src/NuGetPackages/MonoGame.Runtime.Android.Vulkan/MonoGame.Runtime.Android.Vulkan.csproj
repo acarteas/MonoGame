@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Android Vulkan native runtime for MonoGame Native (SDL2 and shared C++ runtime).</Description>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <_AndroidVulkanSourceRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../..'))</_AndroidVulkanSourceRoot>
+    <AndroidVulkanNativeConfiguration Condition="'$(AndroidVulkanNativeConfiguration)' == ''">$(Configuration)</AndroidVulkanNativeConfiguration>
+  </PropertyGroup>
+  <Import Project="buildTransitive/MonoGame.Runtime.Android.Vulkan.Validation.targets" />
+  <ItemGroup>
+    <None Include="buildTransitive/*" Pack="true" PackagePath="buildTransitive/" />
+  </ItemGroup>
+  <Target Name="ValidateAndroidVulkanPackage" BeforeTargets="_GetPackageFiles">
+    <Error Condition="'$(AndroidVulkanNativeRoot)' == ''" Text="AndroidVulkanNativeRoot is required; set it to the external Android native build root." />
+    <Error Condition="'$(AndroidVulkanNativeConfiguration)' != 'Debug' and '$(AndroidVulkanNativeConfiguration)' != 'Release'" Text="AndroidVulkanNativeConfiguration must be Debug or Release." />
+    <ValidateAndroidVulkanRuntime NativeDirectory="$(AndroidVulkanNativeRoot)/artifacts/x86_64/$(AndroidVulkanNativeConfiguration)" ManifestPath="$(AndroidVulkanNativeRoot)/artifacts/x86_64/$(AndroidVulkanNativeConfiguration)/build-manifest.json" Abi="x86_64" Configuration="$(AndroidVulkanNativeConfiguration)" SourceRoot="$(_AndroidVulkanSourceRoot)">
+      <Output TaskParameter="Libraries" ItemName="_AndroidVulkanX64" />
+    </ValidateAndroidVulkanRuntime>
+    <ValidateAndroidVulkanRuntime NativeDirectory="$(AndroidVulkanNativeRoot)/artifacts/arm64-v8a/$(AndroidVulkanNativeConfiguration)" ManifestPath="$(AndroidVulkanNativeRoot)/artifacts/arm64-v8a/$(AndroidVulkanNativeConfiguration)/build-manifest.json" Abi="arm64-v8a" Configuration="$(AndroidVulkanNativeConfiguration)" SourceRoot="$(_AndroidVulkanSourceRoot)">
+      <Output TaskParameter="Libraries" ItemName="_AndroidVulkanArm64" />
+    </ValidateAndroidVulkanRuntime>
+    <ItemGroup>
+      <None Include="@(_AndroidVulkanX64)" Pack="true" PackagePath="runtimes/android-x64/native/" />
+      <None Include="@(_AndroidVulkanArm64)" Pack="true" PackagePath="runtimes/android-arm64/native/" />
+      <None Include="$(AndroidVulkanNativeRoot)/artifacts/x86_64/$(AndroidVulkanNativeConfiguration)/build-manifest.json" Pack="true" PackagePath="manifests/android-x64/" />
+      <None Include="$(AndroidVulkanNativeRoot)/artifacts/arm64-v8a/$(AndroidVulkanNativeConfiguration)/build-manifest.json" Pack="true" PackagePath="manifests/android-arm64/" />
+    </ItemGroup>
+  </Target>
+</Project>

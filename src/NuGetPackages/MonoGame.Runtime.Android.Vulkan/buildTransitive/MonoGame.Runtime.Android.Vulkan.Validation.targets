@@ -1,0 +1,7 @@
+<Project>
+  <UsingTask TaskName="ValidateAndroidVulkanRuntime" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.Core.dll">
+    <Task>
+      <Code Type="Class" Language="cs" Source="$(MSBuildThisFileDirectory)ValidateAndroidVulkanRuntime.cs" />
+    </Task>
+  </UsingTask>
+</Project>

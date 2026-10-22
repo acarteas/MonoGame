@@ -1,0 +1,41 @@
+<Project>
+  <!-- This same file can be imported directly from a source checkout. In source
+       mode AndroidVulkanNativeRoot is the external build root, not artifacts/. -->
+  <PropertyGroup>
+    <_AndroidVulkanPackageRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..'))</_AndroidVulkanPackageRoot>
+  </PropertyGroup>
+  <Import Project="$(MSBuildThisFileDirectory)MonoGame.Runtime.Android.Vulkan.Validation.targets" />
+  <Target Name="ResolveAndroidVulkanNativeLibraries" BeforeTargets="PrepareForBuild;_ResolveNativeLibraries;_IncludeNativeSystemLibraries" Condition="'$(TargetFramework)' != '' and '$(IsCrossTargetingBuild)' != 'true'">
+    <Error Condition="'$(TargetPlatformIdentifier)' != 'android'" Text="MonoGame.Runtime.Android.Vulkan requires an Android target framework (net10.0-android)." />
+    <Error Condition="'$(RuntimeIdentifier)' != 'android-x64' and '$(RuntimeIdentifier)' != 'android-arm64'" Text="Android Vulkan requires one RuntimeIdentifier: android-x64 or android-arm64. Build each RID separately." />
+    <PropertyGroup>
+      <_AndroidVulkanAbi Condition="'$(RuntimeIdentifier)' == 'android-x64'">x86_64</_AndroidVulkanAbi>
+      <_AndroidVulkanAbi Condition="'$(RuntimeIdentifier)' == 'android-arm64'">arm64-v8a</_AndroidVulkanAbi>
+      <_AndroidVulkanIsSource>$([System.IO.File]::Exists('$(_AndroidVulkanPackageRoot)/MonoGame.Runtime.Android.Vulkan.csproj'))</_AndroidVulkanIsSource>
+      <AndroidVulkanNativeConfiguration Condition="'$(_AndroidVulkanIsSource)' == 'True' and '$(AndroidVulkanNativeConfiguration)' == ''">$(Configuration)</AndroidVulkanNativeConfiguration>
+      <_AndroidVulkanExpectedConfiguration>$(AndroidVulkanNativeConfiguration)</_AndroidVulkanExpectedConfiguration>
+      <_AndroidVulkanSourceRoot Condition="'$(_AndroidVulkanIsSource)' == 'True'">$([System.IO.Path]::GetFullPath('$(_AndroidVulkanPackageRoot)/../../..'))</_AndroidVulkanSourceRoot>
+      <_AndroidVulkanNativeDirectory Condition="'$(_AndroidVulkanIsSource)' == 'True'">$(AndroidVulkanNativeRoot)/artifacts/$(_AndroidVulkanAbi)/$(AndroidVulkanNativeConfiguration)</_AndroidVulkanNativeDirectory>
+      <_AndroidVulkanManifest Condition="'$(_AndroidVulkanIsSource)' == 'True'">$(_AndroidVulkanNativeDirectory)/build-manifest.json</_AndroidVulkanManifest>
+      <_AndroidVulkanNativeDirectory Condition="'$(_AndroidVulkanIsSource)' != 'True'">$(_AndroidVulkanPackageRoot)/runtimes/$(RuntimeIdentifier)/native</_AndroidVulkanNativeDirectory>
+      <_AndroidVulkanManifest Condition="'$(_AndroidVulkanIsSource)' != 'True'">$(_AndroidVulkanPackageRoot)/manifests/$(RuntimeIdentifier)/build-manifest.json</_AndroidVulkanManifest>
+    </PropertyGroup>
+    <Error Condition="'$(_AndroidVulkanIsSource)' == 'True' and '$(AndroidVulkanNativeRoot)' == ''" Text="AndroidVulkanNativeRoot is required for source consumption; set it to the external Android native build root." />
+    <Error Condition="'$(AndroidVulkanNativeConfiguration)' != '' and '$(AndroidVulkanNativeConfiguration)' != 'Debug' and '$(AndroidVulkanNativeConfiguration)' != 'Release'" Text="AndroidVulkanNativeConfiguration must be Debug or Release when supplied." />
+    <ValidateAndroidVulkanRuntime NativeDirectory="$(_AndroidVulkanNativeDirectory)" ManifestPath="$(_AndroidVulkanManifest)" Abi="$(_AndroidVulkanAbi)" Configuration="$(_AndroidVulkanExpectedConfiguration)" SourceRoot="$(_AndroidVulkanSourceRoot)">
+      <Output TaskParameter="Libraries" ItemName="_AndroidVulkanNativeLibraries" />
+    </ValidateAndroidVulkanRuntime>
+    <ItemGroup>
+      <AndroidNativeLibrary Remove="@(_AndroidVulkanNativeLibraries)" />
+      <AndroidNativeLibrary Include="@(_AndroidVulkanNativeLibraries)" />
+    </ItemGroup>
+  </Target>
+  <!-- NuGet also discovers runtimes/*/native automatically. These files are
+       supplied above with explicit Android ABI metadata, so remove its copies. -->
+  <Target Name="_RemoveAndroidVulkanNuGetNativeDuplicates" BeforeTargets="_IncludeNativeSystemLibraries" DependsOnTargets="ResolveAndroidVulkanNativeLibraries">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(_AndroidVulkanNativeLibraries)" />
+      <NativeCopyLocalItems Remove="@(_AndroidVulkanNativeLibraries)" />
+    </ItemGroup>
+  </Target>
+</Project>
