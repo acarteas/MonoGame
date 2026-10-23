@@ -109,10 +109,12 @@ def source_identities(manifest: dict) -> dict:
     return result
 
 
-def expected_api_exports() -> set[str]:
+def expected_api_exports(configuration: str = "Debug") -> set[str]:
     pattern = re.compile(r"MG_EXPORT\s+[^;{]*?\b((?:MGP|MGG|MGA|MGI|MGM|MG_Asset)_\w+)\s*\(")
     expected = set()
     for header in (SOURCE_ROOT / "native/monogame/include").glob("api_*.h"):
+        if header.name == "api_MGG_AndroidTrace.h" and configuration != "Debug":
+            continue
         expected.update(pattern.findall(header.read_text(encoding="utf-8")))
     return expected - DECLARATION_EXCEPTION
 
@@ -254,7 +256,28 @@ def validate_native(native_root: pathlib.Path, abi: str, configuration: str) -> 
                 "invalid-build-manifest", f"manifest library record is missing: {record_key}")
         require(pathlib.Path(record["path"]).resolve() == path.resolve() and digest(path) == record["sha256"],
                 "stale-artifact", f"{name} does not match its manifest hash/path")
-    required_exports = expected_api_exports() | expected_startup_exports(manifest)
+    required_exports = expected_api_exports(manifest["configuration"]) | expected_startup_exports(manifest)
+    trace = manifest.get("androidTrace")
+    trace_names = ("vulkan/MGG_Vulkan.cpp", "vulkan/MGG_VulkanTrace.inl", "include/api_MGG_AndroidTrace.h")
+    trace_header = SOURCE_ROOT / "native/monogame/include/api_MGG_AndroidTrace.h"
+    trace_symbols = set(re.findall(r"MG_EXPORT\s+[^;{]*?\b(MGG_AndroidTrace_\w+)\s*\(", trace_header.read_text()))
+    debug_trace = manifest["configuration"] == "Debug"
+    require(isinstance(trace, dict) and trace.get("schemaVersion") == 1 and
+            trace.get("available") is debug_trace and trace.get("apiVersion") == 1 and
+            trace.get("eventBytes") == 320 and trace.get("capacity") == 32768 and
+            trace.get("exports") == (sorted(trace_symbols) if debug_trace else []) and
+            isinstance(trace.get("inputs"), dict) and set(trace["inputs"]) == set(trace_names),
+            "invalid-trace-manifest", "exact configuration-bound trace ABI/input manifest required")
+    for name in trace_names:
+        record = trace["inputs"][name]
+        expected_path = SOURCE_ROOT / "native/monogame" / name
+        require(isinstance(record, dict) and record.get("path") == str(expected_path) and
+                record.get("sha256") == digest(expected_path) and record.get("bytes") == expected_path.stat().st_size,
+                "stale-trace-source", f"trace input differs: {name}")
+    if not debug_trace:
+        actual_exports = run(readelf, "--dyn-syms", "--wide", artifact_dir / "libmgruntime.so")
+        require(not any(re.search(r"\b" + re.escape(name) + r"\b", actual_exports) for name in trace_symbols),
+                "release-trace-export", "Android Release must not export Debug trace API")
     elfs = {}
     for name in sorted(PACKAGED_LIBRARIES):
         elfs[name] = inspect_elf(artifact_dir / name, readelf, abi,

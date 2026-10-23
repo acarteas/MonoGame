@@ -27,6 +27,8 @@ for line in run(readelf, "--dyn-syms", "--wide", runtime).splitlines():
         exports.add(fields[7])
 expected = set()
 for header in (script.parent / "include").glob("api_*.h"):
+    if header.name == "api_MGG_AndroidTrace.h" and manifest["configuration"] != "Debug":
+        continue
     expected.update(re.findall(r"MG_EXPORT\s+[^;{]*?\b((?:MGP|MGG|MGA|MGI|MGM|MG_Asset)_\w+)\s*\(", header.read_text()))
 # This existing desktop declaration has no definition in any Native backend.
 # Preserve that ABI baseline; the managed synchronous SDL loop never calls it.
@@ -81,6 +83,17 @@ manifest["androidHost"] = {
     "inputs": {name: entry(path) for name, path in {
         "implementation": script / "host.cpp",
         "header": script.parent / "include/api_MGP_Android.h"}.items()}}
+# Trace availability is configuration-bound; this does not admit changed rendering inputs.
+trace_header = script.parent / "include/api_MGG_AndroidTrace.h"
+trace_exports = set(re.findall(r"MG_EXPORT\s+[^;{]*?\b(MGG_AndroidTrace_\w+)\s*\(", trace_header.read_text()))
+if manifest["configuration"] != "Debug" and trace_exports & exports:
+    raise SystemExit("Android Release must not export Debug trace API")
+manifest["androidTrace"] = {
+    "schemaVersion": 1, "available": manifest["configuration"] == "Debug",
+    "apiVersion": 1, "eventBytes": 320, "capacity": 32768,
+    "exports": sorted(trace_exports) if manifest["configuration"] == "Debug" else [],
+    "inputs": {name: entry(script.parent / name) for name in (
+        "vulkan/MGG_Vulkan.cpp", "vulkan/MGG_VulkanTrace.inl", "include/api_MGG_AndroidTrace.h")}}
 manifest["symbols"] = entry(debug_file)
 manifest["shaders"] = json.loads((shaders / "shader-manifest.json").read_text())
 manifest["shaders"]["manifest"] = entry(shaders / "shader-manifest.json")

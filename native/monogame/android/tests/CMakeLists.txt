@@ -47,3 +47,35 @@ target_link_libraries(android_surface_tests PRIVATE Threads::Threads SDL2::SDL2-
 target_link_options(android_surface_tests PRIVATE "-Wl,--wrap=SDL_Quit")
 add_test(NAME android_surface_lifecycle COMMAND android_surface_tests)
 set_tests_properties(android_surface_lifecycle PROPERTIES TIMEOUT 30)
+
+# The actual renderer TU runs against fake Vulkan/allocation dispatch. Built-in
+# effects are unused and get external test-only placeholders, never shader input.
+set(trace_shader_stubs "${CMAKE_CURRENT_BINARY_DIR}/trace-shader-stubs")
+file(MAKE_DIRECTORY "${trace_shader_stubs}")
+foreach(effect AlphaTestEffect BasicEffect DualTextureEffect EnvironmentMapEffect SkinnedEffect SpriteEffect)
+    file(WRITE "${trace_shader_stubs}/${effect}.vk.mgfxo.h" "static const unsigned char ${effect}_vk_mgfxo[] = {0};\n")
+endforeach()
+add_executable(android_vulkan_trace_tests vulkan_trace_tests.cpp vulkan_trace_header_c.c
+    ../host.cpp ../../common/mg_hash.cpp)
+target_compile_features(android_vulkan_trace_tests PRIVATE cxx_std_17 c_std_11)
+target_compile_definitions(android_vulkan_trace_tests PRIVATE MGP_ANDROID_HOST_TEST MG_VULKAN MG_SDL2)
+target_include_directories(android_vulkan_trace_tests PRIVATE ../../include
+    ../../external/volk ../../external/vulkan-headers/include ../../external/vma/include
+    "${trace_shader_stubs}")
+target_compile_options(android_vulkan_trace_tests PRIVATE -ffunction-sections -fdata-sections)
+target_link_options(android_vulkan_trace_tests PRIVATE -Wl,--gc-sections -Wl,--wrap=__assert_fail -Wl,--wrap=clock_gettime)
+target_link_libraries(android_vulkan_trace_tests PRIVATE Threads::Threads SDL2::SDL2-static dl)
+set(MGG_TRACE_SANITIZER "" CACHE STRING "Standalone host sanitizer: address or thread")
+if(MGG_TRACE_SANITIZER)
+    if(NOT MGG_TRACE_SANITIZER MATCHES "^(address|thread)$")
+        message(FATAL_ERROR "MGG_TRACE_SANITIZER must be address or thread")
+    endif()
+    set(trace_sanitizers "${MGG_TRACE_SANITIZER}")
+    if(MGG_TRACE_SANITIZER STREQUAL "address")
+        set(trace_sanitizers "address,undefined")
+    endif()
+    target_compile_options(android_vulkan_trace_tests PRIVATE -fsanitize=${trace_sanitizers} -fno-omit-frame-pointer)
+    target_link_options(android_vulkan_trace_tests PRIVATE -fsanitize=${trace_sanitizers})
+endif()
+add_test(NAME android_vulkan_trace COMMAND android_vulkan_trace_tests)
+set_tests_properties(android_vulkan_trace PROPERTIES TIMEOUT 60)
