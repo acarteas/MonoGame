@@ -2137,6 +2137,34 @@ void MGVK_RecreateSwapChain(
 		multiSampleCount = std::clamp(multiSampleCount, 1, maxMultisampleCount);
 	}
 
+    VkSurfaceTransformFlagBitsKHR preTransform = surface_capabilities.currentTransform;
+#if defined(__ANDROID__)
+    const VkExtent2D drawableExtent = { width, height };
+
+    // Native renders in the drawable's orientation without pre-rotating vertices.
+    // Let Android's compositor apply the surface rotation to that unrotated image.
+    if ((surface_capabilities.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) == 0)
+    {
+        fprintf(stderr, "Android Vulkan surface does not support unrotated presentation (supportedTransforms=0x%x).\n",
+            surface_capabilities.supportedTransforms);
+        return;
+    }
+    preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+
+    // Android scales mismatched extents during presentation. Use its actual
+    // surface size when fixed, rather than a desktop/default-size request.
+    if (surface_capabilities.currentExtent.width != UINT32_MAX &&
+        surface_capabilities.currentExtent.height != UINT32_MAX)
+    {
+        width = surface_capabilities.currentExtent.width;
+        height = surface_capabilities.currentExtent.height;
+    }
+    if (width == 0 || height == 0)
+    {
+        return;
+    }
+#endif
+
 	// We apply the extent range to the entire swapchain size to avoid surface scaling and errors.
 	device->swapchainWidth = std::clamp(width, surface_capabilities.minImageExtent.width, surface_capabilities.maxImageExtent.width);
 	device->swapchainHeight = std::clamp(height, surface_capabilities.minImageExtent.height, surface_capabilities.maxImageExtent.height);
@@ -2282,7 +2310,7 @@ void MGVK_RecreateSwapChain(
 	create_info.imageArrayLayers = 1;
 	create_info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 	create_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	create_info.preTransform = surface_capabilities.currentTransform;
+	create_info.preTransform = preTransform;
 	create_info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
 	create_info.presentMode = selectedPresentMode;
 	create_info.clipped = VK_TRUE;
@@ -2293,6 +2321,13 @@ void MGVK_RecreateSwapChain(
 	create_info.minImageCount = std::max(2u, surface_capabilities.minImageCount);
 	if (surface_capabilities.maxImageCount > 0)
 		create_info.minImageCount = std::min(create_info.minImageCount, surface_capabilities.maxImageCount);
+
+#if defined(__ANDROID__)
+    fprintf(stderr, "Android Vulkan swapchain: drawable=%ux%u currentExtent=%ux%u imageExtent=%ux%u currentTransform=0x%x preTransform=0x%x supportedTransforms=0x%x\n",
+        drawableExtent.width, drawableExtent.height, surface_capabilities.currentExtent.width, surface_capabilities.currentExtent.height,
+        extent.width, extent.height, surface_capabilities.currentTransform, preTransform,
+        surface_capabilities.supportedTransforms);
+#endif
 
 	MGVK_TRACE(MGVK_TraceRecord(MGVK_TraceContext(device), MGG_TRACE_SWAPCHAIN_RECREATE_BEGIN))
 	res = vkCreateSwapchainKHR(device->device, &create_info, nullptr, &device->swapchain);
