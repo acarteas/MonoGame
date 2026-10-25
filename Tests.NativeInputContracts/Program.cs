@@ -168,7 +168,8 @@ internal static unsafe class Program
         if (mode == "desktop")
         {
             Check(GamePad.Handle == nativeAddress && GamePad.GetCapabilities(0).IsConnected, "desktop controller behavior preserved");
-            Check(Keyboard.Keys.Contains(Keys.A) && MessageBox._window != null, "desktop cleanup unchanged");
+            Check(Keyboard.Keys.Contains(Keys.A), "desktop keyboard behavior preserved");
+            Check(MessageBox._window == null && Mouse.PrimaryWindow == null, "disposed desktop window references cleared");
             Check(!GamePad.OwnsNativePlatform(old, nativeAddress), "desktop never binds Android owner");
             return;
         }

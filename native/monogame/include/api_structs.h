@@ -86,6 +86,26 @@ struct MGG_GraphicsDevice_Caps
     mgint MaxVertexTextureSlots;
     mgint MaxVertexBufferSlots;
     mgint ShaderProfile;
+    mgint MaxTextureAnisotropy;
+    mgint MaxMultiSampleCount;
+    mgbool SupportsNonPowerOfTwo;
+    mgbool SupportsTextureFilterAnisotropic;
+    mgbool SupportsDepth24;
+    mgbool SupportsPackedDepthStencil;
+    mgbool SupportsDepthNonLinear;
+    mgbool SupportsTextureMaxLevel;
+    mgbool SupportsDxt1;
+    mgbool SupportsS3tc;
+    mgbool SupportsSRgb;
+    mgbool SupportsDepthClamp;
+    mgbool SupportsTextureArrays;
+    mgbool SupportsVertexTextures;
+    mgbool SupportsFloatTextures;
+    mgbool SupportsHalfFloatTextures;
+    mgbool SupportsNormalized;
+    mgbool SupportsInstancing;
+    mgbool SupportsBaseIndexInstancing;
+    mgbool SupportsSeparateBlendStates;
 };
 
 struct Vector4
@@ -163,6 +183,17 @@ struct MGG_InputElement
     mguint InstanceDataStepRate;
 };
 
+struct MGM_SongInfo
+{
+    mgulong duration;
+};
+
+struct MGM_SongEvent
+{
+    MGSongEventType type;
+    mgulong generation;
+};
+
 struct MGM_AudioDecoderInfo
 {
     mgint samplerate;
@@ -196,6 +227,8 @@ struct MGP_MouseButtonEvent
 {
     void* Window;
     MGMouseButton Button;
+    mgint X;
+    mgint Y;
 };
 
 struct MGP_MouseWheelEvent
@@ -263,5 +296,16 @@ struct MGP_ControllerCaps
     mgbool HasLeftVibrationMotor;
     mgbool HasRightVibrationMotor;
     mgbool HasVoiceSupport;
+};
+
+struct MGP_NativeGraphicsHandles
+{
+    MGGraphicsBackend Backend;
+    void* Instance;
+    void* PhysicalDevice;
+    void* LogicalDevice;
+    void* Queue;
+    mgint QueueFamilyIndex;
+    mgint QueueIndex;
 };
 

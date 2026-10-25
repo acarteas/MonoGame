@@ -37,6 +37,9 @@ internal static class Program
         Check(window.ClientBounds.Width == (MGP.Android ? 2340 : 800));
         Check(window.ClientBounds.Height == (MGP.Android ? 1080 : 480));
         Check(AssemblyHelper.IconQueries == (MGP.Android ? 0 : 1));
+        window.CreateWindow(default(MGP_WindowCreateInfo));
+        window.CreateWindow(new MGP_WindowCreateInfo { MultiSampleSamples = 4 });
+        Check(MGP.DestroyNativeCalls == 0 && MGP.CreateNativeCalls == 0);
         var pp = platform.Game.GraphicsDevice.PresentationParameters;
         pp.BackBufferWidth = 320;
         pp.BackBufferHeight = 200;
@@ -59,6 +62,7 @@ internal static class Program
         Check(platform.Game.GraphicsDevice.Viewport.Width == pp.BackBufferWidth);
         Check(platform.Game.GraphicsDevice.Viewport.Height == pp.BackBufferHeight);
         Check(resized == 1 && MGP.SetSizeCalls == (MGP.Android ? 0 : 2));
+        Check(MGG.ResizeCalls == (MGP.Android ? 0 : 1));
         window.ClientResize(720, 333);
         Check(resized == 1);
         window.Destroy();
@@ -95,9 +99,11 @@ namespace Microsoft.Xna.Framework
 namespace Microsoft.Xna.Framework.Graphics
 {
     public class NoSuitableGraphicsDeviceException : Exception { public NoSuitableGraphicsDeviceException(string message) : base(message) { } }
-    public class PresentationParameters { public bool IsFullScreen, HardwareModeSwitch; public int BackBufferWidth, BackBufferHeight; }
+    public class PresentationParameters { public bool IsFullScreen, HardwareModeSwitch; public int BackBufferWidth, BackBufferHeight, MultiSampleCount; public nint DeviceWindowHandle; public int BackBufferFormat, DepthStencilFormat; public PresentInterval PresentationInterval; }
+    public enum PresentInterval { Default }
+    public static class IntervalExtensions { public static int GetSyncInterval(this PresentInterval value) => 1; }
     public struct Viewport { public int Width, Height; public Viewport(int x, int y, int width, int height) { Width = width; Height = height; } }
-    public class GraphicsDevice { public PresentationParameters PresentationParameters = new(); public Viewport Viewport; }
+    public class GraphicsDevice { public nint Handle; public PresentationParameters PresentationParameters = new(); public Viewport Viewport; public Rectangle ScissorRectangle; }
 }
 namespace MonoGame.Framework.Utilities
 {
@@ -112,9 +118,16 @@ namespace MonoGame.Interop
 {
     internal struct MGP_Window { }
     internal struct MGP_Platform { }
+    internal struct MGP_WindowCreateInfo { public int RedSize, GreenSize, BlueSize, AlphaSize, FramebufferSrgbCapable, DepthSize, StencilSize, MultiSampleBuffers, MultiSampleSamples; }
+    internal static class MGG { internal static int ResizeCalls; public static byte GraphicsDevice_ResizeSwapchain(nint device, nint window, int width, int height, int color, int depth, int samples, int interval) { ++ResizeCalls; return 1; } }
     internal static unsafe class MGP
     {
         internal static bool Android;
+        internal static int DestroyNativeCalls, CreateNativeCalls;
+        public static byte Window_CreateNativeWindow(MGP_Window* window, ref int width, ref int height, string title, ref MGP_WindowCreateInfo info) { ++CreateNativeCalls; return 1; }
+        public static byte Window_BeginRecreateNativeWindow(MGP_Window* window, ref int width, ref int height, string title, ref MGP_WindowCreateInfo info) { ++CreateNativeCalls; return 1; }
+        public static void Window_DestroyNativeWindow(MGP_Window* window) { ++DestroyNativeCalls; }
+        public static void Window_FinalizeRecreateNativeWindow(MGP_Window* window) { }
         internal static int Width = 2340, Height = 1080, SetSizeCalls, FullScreenCalls;
         public static MonoGamePlatform Platform_GetPlatform() => Android ? MonoGamePlatform.Android : MonoGamePlatform.DesktopVK;
         public static GraphicsBackend Platform_GetGraphicsBackend() => GraphicsBackend.Vulkan;
@@ -136,4 +149,13 @@ namespace MonoGame.Interop
         public static void Window_Show(MGP_Window* window, byte show) { }
         public static void Window_Destroy(MGP_Window* window) { }
     }
+}
+
+namespace Microsoft.Xna.Framework.Input
+{
+    internal static class Mouse { internal static nint WindowHandle; }
+}
+namespace Microsoft.Xna.Framework
+{
+    internal static unsafe class MessageBox { internal static MGP_Window* _window; }
 }

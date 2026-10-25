@@ -37,8 +37,8 @@ public sealed class BuildNativeDependenciesTask : FrostingTask<BuildContext>
         RecreateDirectory(context, sdlBuildDir);
 
         var configureArgs = new ProcessArgumentBuilder()
-            .Append("-S").AppendQuoted(context.MakeAbsolute(new DirectoryPath(sdlSourceDir)).FullPath)
-            .Append("-B").AppendQuoted(context.MakeAbsolute(new DirectoryPath(sdlBuildDir)).FullPath)
+            .Append("-S").AppendQuoted(context.MakeAbsoluteForDocker(new DirectoryPath(sdlSourceDir)).FullPath)
+            .Append("-B").AppendQuoted(context.MakeAbsoluteForDocker(new DirectoryPath(sdlBuildDir)).FullPath)
             .Append("-DSDL_STATIC=ON")
             .Append("-DSDL_TEST=OFF");
 
@@ -49,8 +49,8 @@ public sealed class BuildNativeDependenciesTask : FrostingTask<BuildContext>
         if (context.Environment.Platform.Family == PlatformFamily.Linux)
         {
             var validationArgs = new ProcessArgumentBuilder()
-                .AppendQuoted("-DSDL_BUILD_DIR=" + context.MakeAbsolute(new DirectoryPath(sdlBuildDir)).FullPath)
-                .Append("-P").AppendQuoted(context.MakeAbsolute(new FilePath("native/monogame/ValidateLinuxSdlAudio.cmake")).FullPath);
+                .AppendQuoted("-DSDL_BUILD_DIR=" + context.MakeAbsoluteForDocker(new DirectoryPath(sdlBuildDir)).FullPath)
+                .Append("-P").AppendQuoted(context.MakeAbsoluteForDocker(new DirectoryPath("native/monogame")).FullPath + "/ValidateLinuxSdlAudio.cmake");
             RunCMake(context, validationArgs, "SDL2 is missing required Linux audio backends; see the CMake error and REQUIREMENTS.md.");
         }
 
@@ -69,11 +69,11 @@ public sealed class BuildNativeDependenciesTask : FrostingTask<BuildContext>
         var sdlIncludeDir = System.IO.Path.Combine("native/monogame/external/sdl2/sdl", "include");
 
         var configureArgs = new ProcessArgumentBuilder()
-            .Append("-S").AppendQuoted(context.MakeAbsolute(new DirectoryPath(faudioSourceDir)).FullPath)
-            .Append("-B").AppendQuoted(context.MakeAbsolute(new DirectoryPath(faudioBuildDir)).FullPath)
+            .Append("-S").AppendQuoted(context.MakeAbsoluteForDocker(new DirectoryPath(faudioSourceDir)).FullPath)
+            .Append("-B").AppendQuoted(context.MakeAbsoluteForDocker(new DirectoryPath(faudioBuildDir)).FullPath)
             .Append("-DBUILD_SHARED_LIBS=OFF")
-            .Append($"-DCMAKE_C_STANDARD_INCLUDE_DIRECTORIES=\"{context.MakeAbsolute(new DirectoryPath(sdlIncludeDir))}\"")
-            .Append($"-DCMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES=\"{context.MakeAbsolute(new DirectoryPath(sdlIncludeDir))}\"")
+            .Append($"-DCMAKE_C_STANDARD_INCLUDE_DIRECTORIES=\"{context.MakeAbsoluteForDocker(new DirectoryPath(sdlIncludeDir)).FullPath}\"")
+            .Append($"-DCMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES=\"{context.MakeAbsoluteForDocker(new DirectoryPath(sdlIncludeDir)).FullPath}\"")
             .Append("-DBUILD_SDL3=OFF");
 
         AppendPlatformCMakeArgs(configureArgs, context, isSDL: false, targetArch);
@@ -121,8 +121,7 @@ public sealed class BuildNativeDependenciesTask : FrostingTask<BuildContext>
 
     private void RunCMake(BuildContext context, ProcessArgumentBuilder args, string errorMessage)
     {
-        var settings = new ProcessSettings { Arguments = args };
-        if (context.StartProcess("cmake", settings) != 0)
+        if (context.StartProcessWithDocker("cmake", "", args) != 0)
         {
             throw new Exception(errorMessage);
         }
@@ -132,7 +131,7 @@ public sealed class BuildNativeDependenciesTask : FrostingTask<BuildContext>
     {
         var buildArgs = new ProcessArgumentBuilder()
             .Append("--build")
-            .AppendQuoted(context.MakeAbsolute(new DirectoryPath(buildDir)).FullPath)
+            .AppendQuoted(context.MakeAbsoluteForDocker(new DirectoryPath(buildDir)).FullPath)
             .Append("--config").Append(config)
             .Append("--parallel");
 

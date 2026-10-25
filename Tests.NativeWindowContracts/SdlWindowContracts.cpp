@@ -86,7 +86,7 @@ int main()
     platform.sessionId = lifecycle.SessionId;
 #endif
     int width = 800, height = 480;
-    auto window = MGP_Window_Create(&platform, width, height, "Contract test");
+    auto window = MGP_Window_Create(&platform, width, height, "Contract test", nullptr);
 #if TEST_ANDROID
     assert(width == 2340 && height == 1080);
     assert(drawableQueries == 1);

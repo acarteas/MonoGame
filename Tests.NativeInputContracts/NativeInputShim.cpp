@@ -43,7 +43,7 @@ void MGP_Platform_Destroy(MGP_Platform*)
     }
     ++destroys;
 }
-MGP_Window* MGP_Window_Create(MGP_Platform*, mgint&, mgint&, const char*) { return reinterpret_cast<MGP_Window*>(0x200); }
+MGP_Window* MGP_Window_Create(MGP_Platform*, mgint&, mgint&, const char*, const MGP_WindowCreateInfo*) { return reinterpret_cast<MGP_Window*>(0x200); }
 #ifndef FAIL_DESTROY
 void MGP_Window_Destroy(MGP_Window*) { }
 #endif
