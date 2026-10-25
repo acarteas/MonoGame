@@ -7,6 +7,13 @@
 #include "mg_common.h"
 
 #include <SDL.h>
+#if defined(__ANDROID__)
+#include "../android/surface_lifecycle.h"
+#endif
+
+#if defined(__ANDROID__) && defined(MG_VULKAN)
+#include <SDL_vulkan.h>
+#endif
 
 #if _WIN32
 #include <combaseapi.h>
@@ -15,6 +22,11 @@
 
 struct MGP_Platform
 {
+#if defined(__ANDROID__)
+    uint64_t sessionId = 0;
+    uint64_t lifecycleRevision = 0;
+    uint64_t inputRetireRevision = 0;
+#endif
     std::vector<MGP_Window*> windows;
     std::queue<MGP_Event> queued_events;
     std::map<mgint, SDL_GameController*> controllers;
@@ -202,6 +214,12 @@ MGP_Platform* MGP_Platform_Create(MGGameRunBehavior& behavior)
     //
     //_CrtSetBreakAlloc(327);
 
+#if defined(__ANDROID__)
+
+    // The game must service retirement requests even while Android is paused.
+    // SDL samples this when creating the video device, before SDL_Init returns.
+    SDL_SetHint(SDL_HINT_ANDROID_BLOCK_ON_PAUSE, "0");
+#endif
 	if (SDL_WasInit(0) == 0) {
 		if (SDL_Init(
 			SDL_INIT_VIDEO |
@@ -224,6 +242,18 @@ MGP_Platform* MGP_Platform_Create(MGGameRunBehavior& behavior)
 	behavior = MGGameRunBehavior::Synchronous;
 
 	auto platform = new MGP_Platform();
+#if defined(__ANDROID__)
+    MGP_Android_Lifecycle lifecycle;
+    if (MGP_Android_GetLifecycle(platform->sessionId, &lifecycle) == MGP_ANDROID_OK)
+    {
+        platform->sessionId = lifecycle.SessionId;
+    }
+    else
+    {
+        delete platform;
+        return nullptr;
+    }
+#endif
 	return platform;
 }
 
@@ -274,7 +304,9 @@ void MGP_Platform_BeforeInitialize(MGP_Platform* platform)
 
 MGMonoGamePlatform MGP_Platform_GetPlatform()
 {
-#if MG_VULKAN
+#if defined(__ANDROID__)
+    return MGMonoGamePlatform::Android;
+#elif MG_VULKAN
     return MGMonoGamePlatform::DesktopVK;
 #elif MG_DIRECTX12
     return MGMonoGamePlatform::WindowsDX12;
@@ -406,6 +438,37 @@ static MGControllerInput FromSDLAxis(Uint8 axis)
 
 mgbyte MGP_Platform_PollEvent(MGP_Platform* platform, MGP_Event& event_)
 {
+#if defined(__ANDROID__)
+    MGP_Android_Lifecycle lifecycle;
+    if (MGP_Android_GetLifecycle(platform->sessionId, &lifecycle) == MGP_ANDROID_OK &&
+        lifecycle.Revision != platform->lifecycleRevision)
+    {
+        static_assert(sizeof(MGP_AndroidLifecycle) == sizeof(MGP_Android_Lifecycle), "lifecycle ABI");
+        platform->lifecycleRevision = lifecycle.Revision;
+        if (lifecycle.RetireRevision > platform->inputRetireRevision)
+        {
+            platform->inputRetireRevision = lifecycle.RetireRevision;
+            MGP_Android_DiscardPendingInput();
+            std::queue<MGP_Event> retained;
+            while (!platform->queued_events.empty())
+            {
+                const auto& pending = platform->queued_events.front();
+                if (!((pending.Type >= MGEventType::KeyDown && pending.Type <= MGEventType::MouseWheel) ||
+                    pending.Type == MGEventType::ControllerStateChange))
+                {
+                    retained.push(pending);
+                }
+                platform->queued_events.pop();
+            }
+            platform->queued_events.swap(retained);
+        }
+        event_ = {};
+        event_.Type = MGEventType::AndroidLifecycle;
+        memcpy(&event_.AndroidLifecycle, &lifecycle, sizeof(lifecycle));
+        return true;
+    }
+#endif
+
 	assert(platform != nullptr);
 
     SDL_Event ev;
@@ -428,6 +491,20 @@ mgbyte MGP_Platform_PollEvent(MGP_Platform* platform, MGP_Event& event_)
 
         switch (ev.type)
         {
+#if defined(__ANDROID__)
+        case SDL_APP_WILLENTERBACKGROUND:
+        case SDL_APP_DIDENTERBACKGROUND:
+            event_.Type = MGEventType::AppBackground;
+            return true;
+        case SDL_APP_WILLENTERFOREGROUND:
+        case SDL_APP_DIDENTERFOREGROUND:
+            event_.Type = MGEventType::AppForeground;
+            return true;
+        case SDL_APP_TERMINATING:
+            event_.Type = MGEventType::AppTerminating;
+            return true;
+#endif
+
         case SDL_QUIT:
             event_.Type = MGEventType::Quit;
             return true;
@@ -637,6 +714,12 @@ mgbyte MGP_Platform_PollEvent(MGP_Platform* platform, MGP_Event& event_)
                 event_.Type = MGEventType::WindowResized;
                 event_.Window.Data1 = ev.window.data1;
                 event_.Window.Data2 = ev.window.data2;
+#if defined(__ANDROID__)
+                if (event_.Window.Window != nullptr)
+                {
+                    MGP_Window_GetClientSize(static_cast<MGP_Window*>(event_.Window.Window), event_.Window.Data1, event_.Window.Data2);
+                }
+#endif
                 return true;
                 break;
             case SDL_WINDOWEVENT_FOCUS_GAINED:
@@ -696,6 +779,15 @@ mgbyte MGP_Platform_BeforeUpdate(MGP_Platform* platform)
 
 mgbyte MGP_Platform_BeforeDraw(MGP_Platform* platform)
 {
+#if defined(__ANDROID__)
+    MGP_Android_Lifecycle lifecycle;
+    if (MGP_Android_GetLifecycle(platform->sessionId, &lifecycle) != MGP_ANDROID_OK ||
+        lifecycle.Generation == 0 || lifecycle.Flags != MGP_ANDROID_SURFACE_READY)
+    {
+        return false;
+    }
+#endif
+
 	assert(platform != nullptr);
 
     // TO DO: Vulkan wants that we stop rendering if the window is minimized on Windows (because surface extent is 0x0 when this happens, which will crash Vulkan).
@@ -750,6 +842,12 @@ MGP_Window* MGP_Window_Create(
 		return nullptr;
 	}
 
+#if defined(__ANDROID__)
+
+    // Android owns the window size; requested desktop defaults are only creation hints.
+    MGP_Window_GetClientSize(window, width, height);
+#endif
+
     window->windowId = SDL_GetWindowID(window->window);
 
 	platform->windows.push_back(window);
@@ -773,10 +871,12 @@ void MGP_Window_SetIconBitmap(MGP_Window* window, mgbyte* icon, mgint length)
 {
     assert(window != nullptr);
 
+#if !defined(__ANDROID__)
     auto src = SDL_RWFromConstMem(icon, length);
     auto surface = SDL_LoadBMP_RW(src, 1);
 
     SDL_SetWindowIcon(window->window, surface);
+#endif
 }
 
 void* MGP_Window_GetNativeHandle(MGP_Window* window)
@@ -791,12 +891,16 @@ mgbyte MGP_Window_GetAllowUserResizing(MGP_Window* window)
 	assert(window != nullptr);
 	assert(window->window != nullptr);
 
+#if defined(__ANDROID__)
+    return false;
+#else
 	auto flags = SDL_GetWindowFlags(window->window);
 
 	if ((flags & SDL_WINDOW_RESIZABLE) != 0)
 		return true;
 
 	return false;
+#endif
 }
 
 void MGP_Window_SetAllowUserResizing(MGP_Window* window, mgbyte allow)
@@ -804,34 +908,44 @@ void MGP_Window_SetAllowUserResizing(MGP_Window* window, mgbyte allow)
 	assert(window != nullptr);
 	assert(window->window != nullptr);
 
+#if !defined(__ANDROID__)
 	SDL_SetWindowResizable(window->window, allow ? SDL_TRUE : SDL_FALSE);
+#endif
 }
 
 mgbyte MGP_Window_GetIsBorderless(MGP_Window* window)
 {
 	assert(window != nullptr);
 
+#if defined(__ANDROID__)
+    return true;
+#else
 	auto flags = SDL_GetWindowFlags(window->window);
 
 	if ((flags & SDL_WINDOW_BORDERLESS) != 0)
 		return true;
 
 	return false;
+#endif
 }
 
 void MGP_Window_SetIsBorderless(MGP_Window* window, mgbyte borderless)
 {
 	assert(window != nullptr);
 
+#if !defined(__ANDROID__)
 	SDL_SetWindowBordered(window->window, borderless ? SDL_FALSE : SDL_TRUE);
+#endif
 }
 
 void MGP_Window_SetTitle(MGP_Window* window, const char* title)
 {
     assert(window != nullptr);
 
+#if !defined(__ANDROID__)
     title = title ? title : "";
     SDL_SetWindowTitle(window->window, title);
+#endif
 }
 
 void MGP_Window_Show(MGP_Window* window, mgbyte show)
@@ -847,19 +961,39 @@ void MGP_Window_Show(MGP_Window* window, mgbyte show)
 void MGP_Window_GetPosition(MGP_Window* window, mgint& x, mgint& y)
 {
 	assert(window != nullptr);
+#if defined(__ANDROID__)
+    x = 0;
+    y = 0;
+#else
 	SDL_GetWindowPosition(window->window, &x, &y);
+#endif
 }
 
 void MGP_Window_SetPosition(MGP_Window* window, mgint x, mgint y)
 {
 	assert(window != nullptr);
+#if !defined(__ANDROID__)
 	SDL_SetWindowPosition(window->window, x, y);
+#endif
+}
+
+void MGP_Window_GetClientSize(MGP_Window* window, mgint& width, mgint& height)
+{
+    assert(window != nullptr);
+    assert(window->window != nullptr);
+
+#if defined(__ANDROID__) && defined(MG_VULKAN)
+    SDL_Vulkan_GetDrawableSize(window->window, &width, &height);
+#else
+    SDL_GetWindowSize(window->window, &width, &height);
+#endif
 }
 
 void MGP_Window_SetClientSize(MGP_Window* window, mgint width, mgint height)
 {
     assert(window != nullptr);
 
+#if !defined(__ANDROID__)
     // Resizing with SDL depends on the fullscreen mode.
     // If we're in exclusive-fullscreen, SDL_SetWindowDisplayMode()
     // is needed to be called with the closest requested size.
@@ -883,6 +1017,7 @@ void MGP_Window_SetClientSize(MGP_Window* window, mgint width, mgint height)
     }
     else
         SDL_SetWindowSize(window->window, width, height);
+#endif
 }
 
 void MGP_Window_SetCursor(MGP_Window* window, MGP_Cursor* cursor)
@@ -960,7 +1095,9 @@ void MGP_Mouse_SetVisible(MGP_Platform* platform, mgbyte visible)
 void MGP_Mouse_WarpPosition(MGP_Window* window, mgint x, mgint y)
 {
     assert(window != nullptr);
+#if !defined(__ANDROID__)
     SDL_WarpMouseInWindow(window->window, x, y);
+#endif
 }
 
 MGP_Cursor* MGP_Cursor_Create(MGSystemCursor cursor_)

@@ -35,8 +35,27 @@ internal enum EventType : uint
 
     DropFile,
     DropComplete,
+
+    AndroidLifecycle = 18,
+    AppBackground = 19,
+    AppForeground = 20,
+    AppTerminating = 21,
 }
 
+
+[StructLayout(LayoutKind.Sequential, Pack = 8)]
+internal struct MGP_AndroidLifecycle
+{
+    public ulong SessionId;
+    public ulong Generation;
+    public ulong Revision;
+    public ulong RetireRevision;
+    public ulong AcknowledgedRevision;
+    public uint Flags;
+    public uint Reserved;
+
+    internal readonly bool CanDraw => Generation != 0 && Flags == 1;
+}
 
 [StructLayout(LayoutKind.Sequential)]
 internal struct MGP_WindowEvent
@@ -164,7 +183,7 @@ internal struct MGP_DropEvent
 }
 
 
-[StructLayout(LayoutKind.Explicit)]
+[StructLayout(LayoutKind.Explicit, Pack = 1)]
 internal struct MGP_Event
 {
     [FieldOffset(0)]
@@ -193,6 +212,9 @@ internal struct MGP_Event
 
     [FieldOffset(12)]
     public MGP_ControllerEvent Controller;
+
+    [FieldOffset(12)]
+    public MGP_AndroidLifecycle AndroidLifecycle;
 }
 
 
@@ -218,6 +240,12 @@ internal readonly struct MGP_Window { }
 internal static unsafe partial class MGP
 {
     public const string MonoGameNativeDLL = "mgruntime";
+
+    [DllImport(MonoGameNativeDLL, EntryPoint = "MGP_Android_GetLifecycle", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int Android_GetLifecycle(ulong sessionId, out MGP_AndroidLifecycle state);
+
+    [DllImport(MonoGameNativeDLL, EntryPoint = "MGP_Android_AcknowledgeRetired", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int Android_AcknowledgeRetired(ulong sessionId, ulong revision);
 
     #region Platform
 
@@ -316,6 +344,9 @@ internal static unsafe partial class MGP
 
     [DllImport(MonoGameNativeDLL, EntryPoint = "MGP_Window_SetPosition", ExactSpelling = true)]
     public static extern void Window_SetPosition(MGP_Window* window, int x, int y);
+
+    [DllImport(MonoGameNativeDLL, EntryPoint = "MGP_Window_GetClientSize", ExactSpelling = true, CallingConvention = CallingConvention.Cdecl)]
+    public static extern void Window_GetClientSize(MGP_Window* window, out int width, out int height);
 
     [DllImport(MonoGameNativeDLL, EntryPoint = "MGP_Window_SetClientSize", ExactSpelling = true)]
     public static extern void Window_SetClientSize(MGP_Window* window, int width, int height);

@@ -20,6 +20,8 @@ internal class NativeGameWindow : GameWindow
 
     private bool _primaryWindow;
 
+    private static bool IsAndroid => PlatformInfo.MonoGamePlatform == MonoGamePlatform.Android;
+
     private int _width;
     private int _height;
     
@@ -127,7 +129,7 @@ internal class NativeGameWindow : GameWindow
 
         _windows[(nint)_handle] = this;
 
-        var icon = AssemblyHelper.GetDefaultWindowIcon();
+        var icon = IsAndroid ? null : AssemblyHelper.GetDefaultWindowIcon();
         if (icon != null)
         {
             fixed(byte* i = icon)
@@ -161,6 +163,16 @@ internal class NativeGameWindow : GameWindow
 
     public unsafe void OnPresentationChanged(PresentationParameters pp)
     {
+        if (IsAndroid)
+        {
+
+            // Android's drawable determines both client and backbuffer dimensions.
+            MGP.Window_GetClientSize(_handle, out _width, out _height);
+            pp.BackBufferWidth = _width;
+            pp.BackBufferHeight = _height;
+            return;
+        }
+
         if (pp.IsFullScreen && pp.HardwareModeSwitch && IsFullScreen && HardwareModeSwitch)
         {
             // Nothing changed... what do we do here?
@@ -190,13 +202,21 @@ internal class NativeGameWindow : GameWindow
 
     public unsafe void ClientResize(int width, int height)
     {
+        if (IsAndroid)
+        {
+            MGP.Window_GetClientSize(_handle, out width, out height);
+        }
+
         if (_width == width && _height == height)
             return;
 
         _width = width;
         _height = height;
 
-        MGP.Window_SetClientSize(_handle, width, height);
+        if (!IsAndroid)
+        {
+            MGP.Window_SetClientSize(_handle, width, height);
+        }
 
         _platform.Game.GraphicsDevice.PresentationParameters.BackBufferWidth = width;
         _platform.Game.GraphicsDevice.PresentationParameters.BackBufferHeight = height;

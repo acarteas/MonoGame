@@ -3,15 +3,26 @@
 // file 'LICENSE.txt', which is part of this source code package.
 
 #include "api_MGG.h"
+#include "api_vulkan_snapshot.h"
+#if defined(__ANDROID__) && defined(DEBUG)
+#include "api_MGG_AndroidTrace.h"
+#endif
+#include <sstream>
+#include <iomanip>
+#include <locale>
+#include <set>
+#if defined(__ANDROID__)
+#include "../android/surface_lifecycle.h"
+#endif
 
 #include "mg_common.h"
 
-#include "AlphaTestEffect.vk.mgfxo.h"
-#include "BasicEffect.vk.mgfxo.h"
-#include "DualTextureEffect.vk.mgfxo.h"
-#include "EnvironmentMapEffect.vk.mgfxo.h"
-#include "SkinnedEffect.vk.mgfxo.h"
-#include "SpriteEffect.vk.mgfxo.h"
+#include <AlphaTestEffect.vk.mgfxo.h>
+#include <BasicEffect.vk.mgfxo.h>
+#include <DualTextureEffect.vk.mgfxo.h>
+#include <EnvironmentMapEffect.vk.mgfxo.h>
+#include <SkinnedEffect.vk.mgfxo.h>
+#include <SpriteEffect.vk.mgfxo.h>
 #include "mg_effect.h"
 
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
@@ -38,7 +49,9 @@
 #include <volk.h>
 #endif
 
+#if !defined(MGG_ANDROID_TRACE_HOST_TEST)
 #define VMA_IMPLEMENTATION
+#endif
 #define VMA_STATIC_VULKAN_FUNCTIONS 1
 #include <vk_mem_alloc.h>
 
@@ -207,6 +220,9 @@ struct MGVK_Program
 
 struct MGVK_Frame
 {
+#if defined(__ANDROID__) && defined(DEBUG)
+    MGG_AndroidTrace_Event trace{};
+#endif
 	bool is_recording = false;
 	bool is_rendering = false;
 	bool imageAcquiredPending = false;
@@ -272,6 +288,15 @@ const int SAMPLER_SLOT_BINDING_OFFSET = 48;
 
 struct MGG_GraphicsDevice
 {
+#if defined(__ANDROID__) && defined(DEBUG)
+    uint64_t traceDeviceId = 0, traceOwnerTid = 0, traceQueueId = 0;
+    uint64_t traceSurfaceId = 0, traceSwapchainGeneration = 0;
+#endif
+#if defined(__ANDROID__)
+    MGP_Android_SurfaceConsumer androidSurface;
+    bool androidNeedsSwapchain = true;
+    bool androidSurfaceLost = false;
+#endif
 	VkInstance instance = VK_NULL_HANDLE;
 
 	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
@@ -279,6 +304,15 @@ struct MGG_GraphicsDevice
 	VkPhysicalDeviceFeatures deviceFeatures;
 	VkPhysicalDeviceMemoryProperties deviceMemoryProperties;
 	bool customBorderColorSupported = false;
+	VkPhysicalDeviceFeatures snapshotRequestedFeatures = {};
+	std::vector<std::string> snapshotAvailableExtensions, snapshotEnabledExtensions;
+	std::vector<std::string> snapshotAvailableInstanceExtensions, snapshotEnabledInstanceExtensions;
+	uint32_t snapshotAdapterIndex = 0;
+	uint32_t snapshotLoaderApiVersion = 0;
+	uint32_t snapshotRequestedApiVersion = 0;
+	bool snapshotProperties2EXT = false;
+	VkBool32 snapshotScalarRequested = 0, snapshotCustomRequested = 0, snapshotCustomWithoutFormatRequested = 0;
+	VkResult snapshotCreateResult = VK_NOT_READY;
 
 	VkDevice device = VK_NULL_HANDLE;
 
@@ -520,10 +554,36 @@ struct MGG_OcclusionQuery
 struct MGG_GraphicsSystem
 {
 	VkInstance instance;
+	uint32_t loaderApiVersion = 0;
+	uint32_t requestedApiVersion = 0;
+	std::vector<std::string> availableExtensions, enabledExtensions;
 	mgbool supportsPhysicalDeviceProperties2EXT;
 	VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
 	std::vector<MGG_GraphicsAdapter*> adapters;
 };
+
+
+static std::mutex MGVK_SnapshotMutex;
+static std::set<MGG_GraphicsDevice*> MGVK_SnapshotDevices;
+
+#if defined(__ANDROID__) && defined(DEBUG)
+#include "MGG_VulkanTrace.inl"
+#define MGVK_TRACE(...) do { if (MGVK_TraceEnabled.load(std::memory_order_acquire)) { __VA_ARGS__; } } while (0);
+#define MGVK_TRACE_META(...) __VA_ARGS__
+#define MGVK_TRACE_SETUP(name, expression) auto name = MGVK_TraceEnabled.load(std::memory_order_acquire) ? (expression) : MGG_AndroidTrace_Event{};
+#define MGVK_TRACE_SKIP_IF(expression, reason) ((expression) ? (traceSkip = (reason), true) : false)
+#define MGVK_TRACE_VALUE(expression, record) ([&]() { VkResult traceResult = (expression); MGVK_TRACE(record); return traceResult; }())
+#define MGVK_TRACE_CHECK(expression, record) do { VkResult traceResult = (expression); MGVK_TRACE(record); VK_CHECK_RESULT(traceResult); } while (0)
+#define MGVK_TRACE_IGNORE(expression, record) do { VkResult traceResult = (expression); MGVK_TRACE(record); } while (0)
+#else
+#define MGVK_TRACE(...)
+#define MGVK_TRACE_META(...)
+#define MGVK_TRACE_SETUP(name, expression)
+#define MGVK_TRACE_SKIP_IF(expression, reason) expression
+#define MGVK_TRACE_VALUE(expression, record) expression
+#define MGVK_TRACE_CHECK(expression, record) VK_CHECK_RESULT(expression)
+#define MGVK_TRACE_IGNORE(expression, record) expression
+#endif
 
 
 static void MGVK_BufferCopyAndFlush(MGG_GraphicsDevice* device, MGG_Buffer* buffer, int destOffset, mgbyte* data, int dataBytes);
@@ -972,6 +1032,12 @@ MGG_GraphicsSystem* MGG_GraphicsSystem_Create()
 
 	auto system = new MGG_GraphicsSystem();
 	system->instance = instance;
+	system->loaderApiVersion = version;
+	system->requestedApiVersion = app_info.apiVersion;
+    for (const auto& ext : supportedInstanceExtensions) { system->availableExtensions.emplace_back(ext.extensionName); }
+    for (const auto* ext : instanceExtensions) { system->enabledExtensions.emplace_back(ext); }
+    std::sort(system->availableExtensions.begin(), system->availableExtensions.end());
+    std::sort(system->enabledExtensions.begin(), system->enabledExtensions.end());
 	system->supportsPhysicalDeviceProperties2EXT = supportsProperties2EXT;
 
 	// Gather the physical devices.
@@ -1179,6 +1245,8 @@ static VkFormat MGVK_PickSupportedDepthFormat(MGG_GraphicsDevice* device, VkForm
 	return VK_FORMAT_UNDEFINED;
 }
 
+#include "MGG_VulkanSnapshot.inl"
+
 static MGG_Texture* CreateDepthTexture(MGG_GraphicsDevice* device, VkFormat format, uint32_t width, uint32_t height, mgint multiSampleCount)
 {
 	// Both swapchain and offscreen depth attachments use this path, after sample-count selection.
@@ -1288,6 +1356,7 @@ static void MGVK_FlushCommands(MGG_GraphicsDevice* device, MGVK_Frame& frame)
 	MGVK_EndRenderPass(device, frame.commandBuffer);
 
 	VkResult res = vkEndCommandBuffer(frame.commandBuffer);
+	MGVK_TRACE(MGVK_TraceRecord(MGVK_TraceContext(device, &frame), MGG_TRACE_COMMAND_END_RESULT, true, res))
 	VK_CHECK_RESULT(res);
 
 	VkFence renderFence;
@@ -1295,7 +1364,7 @@ static void MGVK_FlushCommands(MGG_GraphicsDevice* device, MGVK_Frame& frame)
 		VkFenceCreateInfo fenceCreateInfo = {};
 		fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 		fenceCreateInfo.flags = 0;
-		VK_CHECK_RESULT(vkCreateFence(device->device, &fenceCreateInfo, nullptr, &renderFence));
+		MGVK_TRACE_CHECK(vkCreateFence(device->device, &fenceCreateInfo, nullptr, &renderFence), MGVK_TraceResourceEvent(device, VK_NULL_HANDLE, traceResult == VK_SUCCESS ? renderFence : VK_NULL_HANDLE, MGG_TRACE_FENCE_CREATE_RESULT, traceResult));
 		VK_SET_OBJECT_NAME(device->device, renderFence, VK_OBJECT_TYPE_FENCE, "MGVK_FlushCommands.renderFence");
 	}
 
@@ -1312,10 +1381,13 @@ static void MGVK_FlushCommands(MGG_GraphicsDevice* device, MGVK_Frame& frame)
 	submitInfo.pCommandBuffers = &frame.commandBuffer;
 	{
 		std::lock_guard lock(device->queueMutex);
-		VK_CHECK_RESULT(vkQueueSubmit(device->queue, 1, &submitInfo, renderFence));
+		MGVK_TRACE_SETUP(traceSubmit, MGVK_TraceSubmission(device, frame.commandBuffer, renderFence, &frame, MGVK_TraceWork(device, MGG_TRACE_READBACK_RENDER_FLUSH), submitInfo.waitSemaphoreCount, 0))
+		MGVK_TRACE_CHECK(vkQueueSubmit(device->queue, 1, &submitInfo, renderFence), MGVK_TraceSubmitted(device, renderFence, traceSubmit, traceResult));
 		frame.imageAcquiredPending = false;
 	}
-	VK_CHECK_RESULT(vkWaitForFences(device->device, 1, &renderFence, VK_TRUE, UINT64_MAX));
+	MGVK_TRACE(MGVK_TraceFence(device, renderFence, MGG_TRACE_FENCE_WAIT_BEGIN))
+	MGVK_TRACE_CHECK(vkWaitForFences(device->device, 1, &renderFence, VK_TRUE, UINT64_MAX), MGVK_TraceFence(device, renderFence, MGG_TRACE_FENCE_WAIT_RESULT, true, traceResult));
+	MGVK_TRACE(MGVK_TraceFreeResource(device, VK_NULL_HANDLE, renderFence))
 	vkDestroyFence(device->device, renderFence, nullptr);
 }
 
@@ -1362,28 +1434,28 @@ static VkCommandBuffer MGVK_BeginNewCommandBuffer(MGG_GraphicsDevice* device, Vk
 	allocInfo.commandBufferCount = 1;
 
 	VkCommandBuffer commandBuffer;
-	VK_CHECK_RESULT(vkAllocateCommandBuffers(device->device, &allocInfo, &commandBuffer));
+	MGVK_TRACE_CHECK(vkAllocateCommandBuffers(device->device, &allocInfo, &commandBuffer), MGVK_TraceResourceEvent(device, traceResult == VK_SUCCESS ? commandBuffer : VK_NULL_HANDLE, VK_NULL_HANDLE, MGG_TRACE_COMMAND_ALLOCATE_RESULT, traceResult));
 	VK_SET_OBJECT_NAME(device->device, commandBuffer, VK_OBJECT_TYPE_COMMAND_BUFFER, "MGVK_BeginNewCommandBuffer::commandBuffer");
 
 	VkCommandBufferBeginInfo beginInfo = {};
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
-	VK_CHECK_RESULT(vkBeginCommandBuffer(commandBuffer, &beginInfo));
+	MGVK_TRACE_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo), MGVK_TraceResourceEvent(device, commandBuffer, VK_NULL_HANDLE, MGG_TRACE_COMMAND_BEGIN_RESULT, traceResult));
 
 	return commandBuffer;
 }
 
 static void MGVK_ExecuteAndFreeCommandBuffer(MGG_GraphicsDevice* device, VkCommandBuffer commandBuffer, VkCommandPool pool)
 {
-	VK_CHECK_RESULT(vkEndCommandBuffer(commandBuffer));
+	MGVK_TRACE_CHECK(vkEndCommandBuffer(commandBuffer), MGVK_TraceRecord(MGVK_TraceContext(device), MGG_TRACE_COMMAND_END_RESULT, true, traceResult));
 
 	VkFence renderFence;
 	{
 		VkFenceCreateInfo fenceCreateInfo = {};
 		fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 		fenceCreateInfo.flags = 0;
-		VK_CHECK_RESULT(vkCreateFence(device->device, &fenceCreateInfo, nullptr, &renderFence));
+		MGVK_TRACE_CHECK(vkCreateFence(device->device, &fenceCreateInfo, nullptr, &renderFence), MGVK_TraceResourceEvent(device, VK_NULL_HANDLE, traceResult == VK_SUCCESS ? renderFence : VK_NULL_HANDLE, MGG_TRACE_FENCE_CREATE_RESULT, traceResult));
 		VK_SET_OBJECT_NAME(device->device, renderFence, VK_OBJECT_TYPE_FENCE, "MGVK_ExecuteAndFreeCommandBuffer.renderFence");
 	}
 
@@ -1395,13 +1467,17 @@ static void MGVK_ExecuteAndFreeCommandBuffer(MGG_GraphicsDevice* device, VkComma
 		submitInfo.commandBufferCount = 1;
 		submitInfo.pCommandBuffers = &commandBuffer;
 
-		VK_CHECK_RESULT(vkQueueSubmit(device->queue, 1, &submitInfo, renderFence));
+		MGVK_TRACE_SETUP(traceSubmit, MGVK_TraceSubmission(device, commandBuffer, renderFence, nullptr, MGVK_TraceWork(device, MGG_TRACE_READBACK_COPY), 0, 0))
+		MGVK_TRACE_CHECK(vkQueueSubmit(device->queue, 1, &submitInfo, renderFence), MGVK_TraceSubmitted(device, renderFence, traceSubmit, traceResult));
 	}
 
-	VK_CHECK_RESULT(vkWaitForFences(device->device, 1, &renderFence, VK_TRUE, UINT64_MAX));
+	MGVK_TRACE(MGVK_TraceFence(device, renderFence, MGG_TRACE_FENCE_WAIT_BEGIN))
+	MGVK_TRACE_CHECK(vkWaitForFences(device->device, 1, &renderFence, VK_TRUE, UINT64_MAX), MGVK_TraceFence(device, renderFence, MGG_TRACE_FENCE_WAIT_RESULT, true, traceResult));
+	MGVK_TRACE(MGVK_TraceFreeResource(device, VK_NULL_HANDLE, renderFence))
 	vkDestroyFence(device->device, renderFence, nullptr);
 
 	pool = pool ? pool : device->cmdPool;
+	MGVK_TRACE(MGVK_TraceFreeResource(device, commandBuffer, VK_NULL_HANDLE))
 	vkFreeCommandBuffers(device->device, pool, 1, &commandBuffer);
 }
 
@@ -1411,11 +1487,27 @@ MGG_GraphicsDevice* MGG_GraphicsDevice_Create(MGG_GraphicsSystem* system, MGG_Gr
 	assert(adapter != nullptr);
 
 	auto device = new MGG_GraphicsDevice();
+    MGVK_TRACE_META(MGVK_TraceRegisterDevice(device);)
+#if defined(__ANDROID__)
+    MGP_Android_Lifecycle lifecycle;
+    if (MGP_Android_GetLifecycle(0, &lifecycle) != MGP_ANDROID_OK)
+    {
+        delete device;
+        return nullptr;
+    }
+    device->androidSurface.SessionId = lifecycle.SessionId;
+#endif
 
 	device->instance = system->instance;
 	device->physicalDevice = adapter->device;
 	device->deviceFeatures = adapter->features;
 	device->deviceProperties = adapter->properties;
+	device->snapshotProperties2EXT = system->supportsPhysicalDeviceProperties2EXT;
+	device->snapshotLoaderApiVersion = system->loaderApiVersion;
+	device->snapshotRequestedApiVersion = system->requestedApiVersion;
+	device->snapshotAvailableInstanceExtensions = system->availableExtensions;
+	device->snapshotEnabledInstanceExtensions = system->enabledExtensions;
+	device->snapshotAdapterIndex = (uint32_t)(std::find(system->adapters.begin(), system->adapters.end(), adapter) - system->adapters.begin());
 
 	printf("Selected GPU: %s\n", device->deviceProperties.deviceName);
 	printf("Supported Vulkan API version: %d.%d.%d\n", VK_API_VERSION_MAJOR(device->deviceProperties.apiVersion), VK_API_VERSION_MINOR(device->deviceProperties.apiVersion), VK_API_VERSION_PATCH(device->deviceProperties.apiVersion));
@@ -1564,7 +1656,16 @@ MGG_GraphicsDevice* MGG_GraphicsDevice_Create(MGG_GraphicsSystem* system, MGG_Gr
 	deviceCreateInfo.enabledExtensionCount = extensions.size();
 	deviceCreateInfo.ppEnabledExtensionNames = extensions.data();
 
+	device->snapshotRequestedFeatures = enabledFeatures;
+	device->snapshotScalarRequested = scalarFeatures.scalarBlockLayout;
+	device->snapshotCustomRequested = customBorderColorFeatures.customBorderColors;
+	device->snapshotCustomWithoutFormatRequested = customBorderColorFeatures.customBorderColorWithoutFormat;
+	for (const auto& ext : deviceExtensions) { device->snapshotAvailableExtensions.emplace_back(ext.extensionName); }
+	for (const auto* ext : extensions) { device->snapshotEnabledExtensions.emplace_back(ext); }
+	std::sort(device->snapshotAvailableExtensions.begin(), device->snapshotAvailableExtensions.end());
+	std::sort(device->snapshotEnabledExtensions.begin(), device->snapshotEnabledExtensions.end());
 	auto res = vkCreateDevice(device->physicalDevice, &deviceCreateInfo, NULL, &device->device);
+	device->snapshotCreateResult = res;
 	VK_CHECK_RESULT(res);
 	VK_SET_OBJECT_NAME(device->device, device->device, VK_OBJECT_TYPE_DEVICE, "MGG_GraphicsDevice.device");
 	VK_SET_OBJECT_NAME(device->device, device->physicalDevice, VK_OBJECT_TYPE_PHYSICAL_DEVICE, "MGG_GraphicsDevice.physicalDevice");
@@ -1576,6 +1677,7 @@ MGG_GraphicsDevice* MGG_GraphicsDevice_Create(MGG_GraphicsSystem* system, MGG_Gr
 	vmaCreateAllocator(&allocatorInfo, &device->allocator);
 
 	vkGetDeviceQueue(device->device, device->graphicsQueueFamily, 0, &device->queue);
+    MGVK_TRACE_META(if (device->queue != VK_NULL_HANDLE) { device->traceQueueId = MGVK_TraceId(); })
 
 	VkCommandPoolCreateInfo cmdPoolInfo = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
 	cmdPoolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -1646,6 +1748,7 @@ MGG_GraphicsDevice* MGG_GraphicsDevice_Create(MGG_GraphicsSystem* system, MGG_Gr
 		device->nullTexture[(int)MGTextureType::Cube] = tex;
 	}
 
+	{ std::lock_guard<std::mutex> lock(MGVK_SnapshotMutex); MGVK_SnapshotDevices.insert(device); }
 	return device;
 }
 
@@ -1748,11 +1851,14 @@ static void MGVK_CleanupSwapChain(MGG_GraphicsDevice* device)
 
 void MGG_GraphicsDevice_Destroy(MGG_GraphicsDevice* device)
 {
+	std::lock_guard<std::mutex> snapshotLock(MGVK_SnapshotMutex);
+	MGVK_SnapshotDevices.erase(device);
+    MGVK_TRACE(MGVK_TraceRecord(MGVK_TraceContext(device), MGG_TRACE_DEVICE_DESTROY_BEGIN))
 	assert(device != nullptr);
 
 	// Be sure we're done drawing.
 	// Prevents some exceptions while shutting down.
-	vkDeviceWaitIdle(device->device);
+	MGVK_TRACE_IGNORE(vkDeviceWaitIdle(device->device), MGVK_TraceRecord(MGVK_TraceContext(device), MGG_TRACE_DEVICE_IDLE_RESULT, true, traceResult));
 
 	MGVK_WaitPendingTransfers(device, nullptr);
 
@@ -1777,7 +1883,9 @@ void MGG_GraphicsDevice_Destroy(MGG_GraphicsDevice* device)
 		auto& frame = device->frames[i];
 
 		vkDestroySemaphore(device->device, frame.imageAcquiredSemaphore, nullptr);
+		MGVK_TRACE(MGVK_TraceFreeResource(device, VK_NULL_HANDLE, frame.completedFence))
 		vkDestroyFence(device->device, frame.completedFence, nullptr);
+		MGVK_TRACE(MGVK_TraceFreeResource(device, frame.commandBuffer, VK_NULL_HANDLE))
 		vkFreeCommandBuffers(device->device, device->cmdPool, 1, &frame.commandBuffer);
 	}
 
@@ -1802,6 +1910,7 @@ void MGG_GraphicsDevice_Destroy(MGG_GraphicsDevice* device)
 	vmaDestroyAllocator(device->allocator);
 
 	vkDestroyDevice(device->device, nullptr);
+    MGVK_TRACE(MGVK_TraceSealDevice(device))
 
 	delete device;
 }
@@ -1820,6 +1929,62 @@ void MGG_GraphicsDevice_GetCaps(MGG_GraphicsDevice* device, MGG_GraphicsDevice_C
 	caps.ShaderProfile = 80;
 }
 
+#if defined(__ANDROID__)
+static bool MGVK_RetireAndroidSurface(MGG_GraphicsDevice* device)
+{
+    MGVK_TRACE(MGVK_TraceRecord(MGVK_TraceContext(device), MGG_TRACE_RETIRE_BEGIN))
+    std::lock_guard lock(device->queueMutex);
+
+    // All calls are on the owning SDL game thread. Transfers also use this
+    // device; device idle covers them before any swapchain attachment is freed.
+    if (MGVK_TRACE_VALUE(vkDeviceWaitIdle(device->device), MGVK_TraceRecord(MGVK_TraceContext(device), MGG_TRACE_DEVICE_IDLE_RESULT, true, traceResult)) != VK_SUCCESS)
+    {
+        MGP_Android_Lifecycle snapshot;
+        if (MGP_Android_GetLifecycle(device->androidSurface.SessionId, &snapshot) == MGP_ANDROID_OK)
+        {
+            uint64_t revision;
+            MGP_Android_PublishLifecycle(snapshot.SessionId, snapshot.Generation,
+                snapshot.Flags | MGP_ANDROID_QUARANTINED | MGP_ANDROID_EXITING, &revision);
+        }
+        return false;
+    }
+    for (auto& frame : device->frames)
+    {
+        if (frame.is_recording)
+        {
+            MGVK_TRACE_IGNORE(vkResetCommandBuffer(frame.commandBuffer, 0), MGVK_TraceRecord(MGVK_TraceContext(device, &frame), MGG_TRACE_COMMAND_RESET_RESULT, true, traceResult));
+        }
+        frame.is_recording = false;
+        frame.is_rendering = false;
+        frame.image_index = UINT32_MAX;
+        frame.imageAcquiredPending = false;
+    }
+    device->inRenderPass = false;
+    MGVK_CleanupSwapChain(device);
+    if (device->surface != VK_NULL_HANDLE)
+    {
+        vkDestroySurfaceKHR(device->instance, device->surface, nullptr);
+        device->surface = VK_NULL_HANDLE;
+    }
+    device->androidNeedsSwapchain = true;
+    MGVK_TRACE(MGVK_TraceRefresh(device))
+    MGVK_TRACE(MGVK_TraceRecord(MGVK_TraceContext(device), MGG_TRACE_RETIRE_END))
+    return true;
+}
+
+static bool MGVK_ApplyAndroidLifecycle(MGG_GraphicsDevice* device)
+{
+    MGP_Android_Lifecycle lifecycle;
+    if (MGP_Android_GetLifecycle(device->androidSurface.SessionId, &lifecycle) != MGP_ANDROID_OK)
+    {
+        return false;
+    }
+    MGVK_TRACE(MGVK_TraceRefresh(device, &lifecycle))
+    MGVK_TRACE(MGVK_TraceRecord(MGVK_TraceContext(device), MGG_TRACE_LIFECYCLE_OBSERVED))
+    return device->androidSurface.Apply(lifecycle, [device] { return MGVK_RetireAndroidSurface(device); });
+}
+#endif
+
 void MGVK_RecreateSwapChain(
 	MGG_GraphicsDevice* device,
 	void* nativeWindowHandle,
@@ -1833,16 +1998,59 @@ void MGVK_RecreateSwapChain(
 	assert(device != nullptr);
 	assert(nativeWindowHandle != nullptr);
 
-	vkDeviceWaitIdle(device->device);
+#if defined(__ANDROID__)
+    if (device->window != nullptr && device->window != nativeWindowHandle &&
+        !MGVK_RetireAndroidSurface(device))
+    {
+        return;
+    }
+    device->androidNeedsSwapchain = device->androidNeedsSwapchain ||
+        device->swapchainWidth != width || device->swapchainHeight != height ||
+        device->colorFormat != vkColor || device->depthFormat != vkDepth ||
+        device->multiSampleCount != multiSampleCount || device->syncInterval != syncInterval;
+    device->window = static_cast<SDL_Window*>(nativeWindowHandle);
+    device->swapchainWidth = width;
+    device->swapchainHeight = height;
+    device->colorFormat = vkColor;
+    device->depthFormat = vkDepth;
+    device->multiSampleCount = multiSampleCount;
+    device->syncInterval = syncInterval;
+    if (!MGVK_ApplyAndroidLifecycle(device))
+    {
+        return;
+    }
+#endif
+#if defined(__ANDROID__)
 
+    // vkDeviceWaitIdle externally synchronizes every queue, including transfers.
+    // Retirement/resize never takes transferMutex while owning queueMutex.
+    std::lock_guard lock(device->queueMutex);
+    if (MGVK_TRACE_VALUE(vkDeviceWaitIdle(device->device), MGVK_TraceRecord(MGVK_TraceContext(device), MGG_TRACE_DEVICE_IDLE_RESULT, true, traceResult)) != VK_SUCCESS)
+    {
+        MGP_Android_Lifecycle snapshot;
+        if (MGP_Android_GetLifecycle(device->androidSurface.SessionId, &snapshot) == MGP_ANDROID_OK)
+        {
+            uint64_t revision;
+            MGP_Android_PublishLifecycle(snapshot.SessionId, snapshot.Generation,
+                snapshot.Flags | MGP_ANDROID_QUARANTINED | MGP_ANDROID_EXITING, &revision);
+        }
+        return;
+    }
+#else
+	vkDeviceWaitIdle(device->device);
 	std::lock_guard lock(device->queueMutex);
+#endif
 
 	VkResult res;
 
 	// Create the surface.
 #if defined(MG_SDL2)
 	auto sdl_window = (SDL_Window*)nativeWindowHandle;
-	if (sdl_window != device->window)
+	if (sdl_window != device->window
+#if defined(__ANDROID__)
+        || device->surface == VK_NULL_HANDLE
+#endif
+    )
 	{
 		MGVK_CleanupSwapChain(device);
 
@@ -1857,17 +2065,22 @@ void MGVK_RecreateSwapChain(
 			device->surface = VK_NULL_HANDLE;
 			return;
 		}
+		MGVK_TRACE_META(device->traceSurfaceId = MGVK_TraceId();)
+        MGVK_TRACE(MGVK_TraceRefresh(device))
+        MGVK_TRACE(MGVK_TraceRecord(MGVK_TraceContext(device), MGG_TRACE_SURFACE_CREATE_RESULT, true, VK_SUCCESS))
 		VK_SET_OBJECT_NAME(device->device, (uint64_t)device->surface, VK_OBJECT_TYPE_SURFACE_KHR, "MGG_GraphicsDevice.surface");
 
 		device->window = sdl_window;
 	}
 
+#if !defined(__ANDROID__)
 	// On resize the swapchain is placed under the title bar
 	// and not in the client area for some reason.  This fixes it.
 	int wx, wy;
 	SDL_GetWindowPosition(device->window, &wx, &wy);
 	SDL_SetWindowPosition(device->window, wx+1, wy);
 	SDL_SetWindowPosition(device->window, wx, wy);
+#endif
 
 #else
 #error Not Implemented
@@ -1879,13 +2092,25 @@ void MGVK_RecreateSwapChain(
 		vkDepth == device->depthFormat &&
 		syncInterval == device->syncInterval &&
 		multiSampleCount == device->multiSampleCount &&
-		device->swapchain != VK_NULL_HANDLE)
+		device->swapchain != VK_NULL_HANDLE
+#if defined(__ANDROID__)
+        && !device->androidNeedsSwapchain
+#endif
+    )
 		return;
 
 	MGVK_CleanupSwapChain(device);
 
 	VkSurfaceCapabilitiesKHR surface_capabilities;
 	res = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device->physicalDevice, device->surface, &surface_capabilities);
+#if defined(__ANDROID__)
+    if (res == VK_ERROR_SURFACE_LOST_KHR || res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR)
+    {
+        device->androidSurfaceLost = res == VK_ERROR_SURFACE_LOST_KHR;
+        device->androidNeedsSwapchain = true;
+        return;
+    }
+#endif
 	VK_CHECK_RESULT(res);
 
 	// If max extent is zero'd, it means the window is minimized, and we should leave the swapchain to VK_NULL_HANDLE and stop rendering (this is done in MGP_Platform_BeforeDraw()).
@@ -1912,6 +2137,34 @@ void MGVK_RecreateSwapChain(
 		multiSampleCount = std::clamp(multiSampleCount, 1, maxMultisampleCount);
 	}
 
+    VkSurfaceTransformFlagBitsKHR preTransform = surface_capabilities.currentTransform;
+#if defined(__ANDROID__)
+    const VkExtent2D drawableExtent = { width, height };
+
+    // Native renders in the drawable's orientation without pre-rotating vertices.
+    // Let Android's compositor apply the surface rotation to that unrotated image.
+    if ((surface_capabilities.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) == 0)
+    {
+        fprintf(stderr, "Android Vulkan surface does not support unrotated presentation (supportedTransforms=0x%x).\n",
+            surface_capabilities.supportedTransforms);
+        return;
+    }
+    preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+
+    // Android scales mismatched extents during presentation. Use its actual
+    // surface size when fixed, rather than a desktop/default-size request.
+    if (surface_capabilities.currentExtent.width != UINT32_MAX &&
+        surface_capabilities.currentExtent.height != UINT32_MAX)
+    {
+        width = surface_capabilities.currentExtent.width;
+        height = surface_capabilities.currentExtent.height;
+    }
+    if (width == 0 || height == 0)
+    {
+        return;
+    }
+#endif
+
 	// We apply the extent range to the entire swapchain size to avoid surface scaling and errors.
 	device->swapchainWidth = std::clamp(width, surface_capabilities.minImageExtent.width, surface_capabilities.maxImageExtent.width);
 	device->swapchainHeight = std::clamp(height, surface_capabilities.minImageExtent.height, surface_capabilities.maxImageExtent.height);
@@ -1924,10 +2177,26 @@ void MGVK_RecreateSwapChain(
 	{
 		uint32_t format_count = 0;
 		res = vkGetPhysicalDeviceSurfaceFormatsKHR(device->physicalDevice, device->surface, &format_count, nullptr);
+#if defined(__ANDROID__)
+        if (res == VK_ERROR_SURFACE_LOST_KHR || res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR)
+        {
+            device->androidSurfaceLost = res == VK_ERROR_SURFACE_LOST_KHR;
+            device->androidNeedsSwapchain = true;
+            return;
+        }
+#endif
 		VK_CHECK_RESULT(res);
 
 		std::vector<VkSurfaceFormatKHR> surfFormats(format_count);
 		res = vkGetPhysicalDeviceSurfaceFormatsKHR(device->physicalDevice, device->surface, &format_count, surfFormats.data());
+#if defined(__ANDROID__)
+        if (res == VK_ERROR_SURFACE_LOST_KHR || res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR)
+        {
+            device->androidSurfaceLost = res == VK_ERROR_SURFACE_LOST_KHR;
+            device->androidNeedsSwapchain = true;
+            return;
+        }
+#endif
 		VK_CHECK_RESULT(res);
 
 	RETRY_SURFACE_FORMAT_SEARCH:
@@ -1985,10 +2254,26 @@ void MGVK_RecreateSwapChain(
 	// Query supported present modes and select the best one
 	uint32_t presentModeCount = 0;
 	res = vkGetPhysicalDeviceSurfacePresentModesKHR(device->physicalDevice, device->surface, &presentModeCount, nullptr);
+#if defined(__ANDROID__)
+    if (res == VK_ERROR_SURFACE_LOST_KHR || res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR)
+    {
+        device->androidSurfaceLost = res == VK_ERROR_SURFACE_LOST_KHR;
+        device->androidNeedsSwapchain = true;
+        return;
+    }
+#endif
 	VK_CHECK_RESULT(res);
 	
 	std::vector<VkPresentModeKHR> presentModes(presentModeCount);
 	res = vkGetPhysicalDeviceSurfacePresentModesKHR(device->physicalDevice, device->surface, &presentModeCount, presentModes.data());
+#if defined(__ANDROID__)
+    if (res == VK_ERROR_SURFACE_LOST_KHR || res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR)
+    {
+        device->androidSurfaceLost = res == VK_ERROR_SURFACE_LOST_KHR;
+        device->androidNeedsSwapchain = true;
+        return;
+    }
+#endif
 	VK_CHECK_RESULT(res);
 	
 	// Prefer MAILBOX -> IMMEDIATE -> FIFO (FIFO is always supported)
@@ -2025,7 +2310,7 @@ void MGVK_RecreateSwapChain(
 	create_info.imageArrayLayers = 1;
 	create_info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 	create_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	create_info.preTransform = surface_capabilities.currentTransform;
+	create_info.preTransform = preTransform;
 	create_info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
 	create_info.presentMode = selectedPresentMode;
 	create_info.clipped = VK_TRUE;
@@ -2037,7 +2322,26 @@ void MGVK_RecreateSwapChain(
 	if (surface_capabilities.maxImageCount > 0)
 		create_info.minImageCount = std::min(create_info.minImageCount, surface_capabilities.maxImageCount);
 
+#if defined(__ANDROID__)
+    fprintf(stderr, "Android Vulkan swapchain: drawable=%ux%u currentExtent=%ux%u imageExtent=%ux%u currentTransform=0x%x preTransform=0x%x supportedTransforms=0x%x\n",
+        drawableExtent.width, drawableExtent.height, surface_capabilities.currentExtent.width, surface_capabilities.currentExtent.height,
+        extent.width, extent.height, surface_capabilities.currentTransform, preTransform,
+        surface_capabilities.supportedTransforms);
+#endif
+
+	MGVK_TRACE(MGVK_TraceRecord(MGVK_TraceContext(device), MGG_TRACE_SWAPCHAIN_RECREATE_BEGIN))
 	res = vkCreateSwapchainKHR(device->device, &create_info, nullptr, &device->swapchain);
+    MGVK_TRACE_META(if (res == VK_SUCCESS) { if (device->traceSwapchainGeneration == UINT64_MAX) { MGVK_TraceIdExhausted.store(true, std::memory_order_relaxed); } else { ++device->traceSwapchainGeneration; } })
+    MGVK_TRACE(MGVK_TraceRefresh(device))
+    MGVK_TRACE(MGVK_TraceRecord(MGVK_TraceContext(device), MGG_TRACE_SWAPCHAIN_CREATE_RESULT, true, res))
+#if defined(__ANDROID__)
+    if (res == VK_ERROR_SURFACE_LOST_KHR || res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR)
+    {
+        device->androidSurfaceLost = res == VK_ERROR_SURFACE_LOST_KHR;
+        device->androidNeedsSwapchain = true;
+        return;
+    }
+#endif
 	VK_CHECK_RESULT(res);
 	VK_SET_OBJECT_NAME(device->device, device->swapchain, VK_OBJECT_TYPE_SWAPCHAIN_KHR, "MGG_GraphicsDevice.swapchain");
 
@@ -2058,7 +2362,8 @@ void MGVK_RecreateSwapChain(
 
 				auto& frame = device->frames[i];
 				vkDestroySemaphore(device->device, frame.imageAcquiredSemaphore, nullptr);
-				vkDestroyFence(device->device, frame.completedFence, nullptr);
+				MGVK_TRACE(MGVK_TraceFreeResource(device, VK_NULL_HANDLE, frame.completedFence))
+		vkDestroyFence(device->device, frame.completedFence, nullptr);
 				if (frame.uniforms)
 					MGG_Buffer_Destroy(device, frame.uniforms);
 				MGVK_DestroyFrameResources(device, i, true);
@@ -2097,6 +2402,7 @@ void MGVK_RecreateSwapChain(
 			auto& frame = device->frames[i];
 
 			res = vkAllocateCommandBuffers(device->device, &comBufferInfo, &frame.commandBuffer);
+            MGVK_TRACE(MGVK_TraceResourceEvent(device, res == VK_SUCCESS ? frame.commandBuffer : VK_NULL_HANDLE, VK_NULL_HANDLE, MGG_TRACE_COMMAND_ALLOCATE_RESULT, res))
 			VK_CHECK_RESULT(res);
 			VK_SET_OBJECT_NAME(device->device, frame.commandBuffer, VK_OBJECT_TYPE_COMMAND_BUFFER, "MGVK_Frame.buffer[%d]", i);
 
@@ -2108,6 +2414,7 @@ void MGVK_RecreateSwapChain(
 			VkFenceCreateInfo fence_create_info = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
 			fence_create_info.flags = 0;//VK_FENCE_CREATE_SIGNALED_BIT;
 			res = vkCreateFence(device->device, &fence_create_info, NULL, &frame.completedFence);
+            MGVK_TRACE(MGVK_TraceResourceEvent(device, VK_NULL_HANDLE, res == VK_SUCCESS ? frame.completedFence : VK_NULL_HANDLE, MGG_TRACE_FENCE_CREATE_RESULT, res))
 			VK_CHECK_RESULT(res);
 			VK_SET_OBJECT_NAME(device->device, frame.completedFence, VK_OBJECT_TYPE_FENCE, "MGVK_Frame.completedFence[%d]", i);
 
@@ -2205,11 +2512,22 @@ void MGVK_RecreateSwapChain(
 		VK_CHECK_RESULT(res);
 		VK_SET_OBJECT_NAME(device->device, frame.imageAcquiredSemaphore, VK_OBJECT_TYPE_SEMAPHORE, "MGVK_Frame.imageAcquiredSemaphore");
 	}
+#if defined(__ANDROID__)
+    device->androidNeedsSwapchain = false;
+    device->androidSurfaceLost = false;
+#endif
 }
 
 void MGVK_RecreateSwapChain(MGG_GraphicsDevice* device)
 {
+#if defined(__ANDROID__)
+    if (!MGVK_RetireAndroidSurface(device))
+    {
+        return;
+    }
+#else
 	MGVK_CleanupSwapChain(device);
+#endif
 
 	if (device->window == nullptr)
 	{
@@ -2262,7 +2580,9 @@ void MGG_GraphicsDevice_ResizeSwapchain(
 
 	MGVK_RecreateSwapChain(device, nativeWindowHandle, width, height, vkColor, vkDepth, multiSampleCount, syncInterval);
 
+#if !defined(__ANDROID__)
 	MGVK_PrepareFrame(device);
+#endif
 }
 
 
@@ -2309,21 +2629,25 @@ void MGVK_BeginCommandBuffer(VkCommandBuffer commandBuffer)
 	};
 
 	auto res = vkResetCommandBuffer(commandBuffer, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+    MGVK_TRACE(MGVK_TraceCommandResult(commandBuffer, MGG_TRACE_COMMAND_RESET_RESULT, res))
 	VK_CHECK_RESULT(res);
 	res = vkBeginCommandBuffer(commandBuffer, &beginInfo);
+    MGVK_TRACE(MGVK_TraceCommandResult(commandBuffer, MGG_TRACE_COMMAND_BEGIN_RESULT, res))
 	VK_CHECK_RESULT(res);
 
 	//vkCmdSetDepthClampEnableEXT(commandBuffer, VK_TRUE);
 }
 
-void MGVK_TryAcquireSwap(MGG_GraphicsDevice* device, MGVK_Frame& frame)
+bool MGVK_TryAcquireSwap(MGG_GraphicsDevice* device, MGVK_Frame& frame)
 {
 	VkResult res;
 
 	// Block and wait for the frame to be done rendering.
 	if (frame.is_rendering)
 	{
+		MGVK_TRACE(MGVK_TraceFence(device, frame.completedFence, MGG_TRACE_FENCE_WAIT_BEGIN))
 		res = vkWaitForFences(device->device, 1, &frame.completedFence, VK_TRUE, UINT64_MAX);
+        MGVK_TRACE(MGVK_TraceFence(device, frame.completedFence, MGG_TRACE_FENCE_WAIT_RESULT, true, res))
 		VK_CHECK_RESULT(res);
 		frame.is_rendering = false;
 	}
@@ -2331,15 +2655,53 @@ void MGVK_TryAcquireSwap(MGG_GraphicsDevice* device, MGVK_Frame& frame)
 	// Do we need to get the next swapchain image?
 	if (device->swapchain != VK_NULL_HANDLE && frame.image_index == -1)
 	{
-		res = vkAcquireNextImageKHR(device->device, device->swapchain, UINT64_MAX,
+		MGVK_TRACE(MGVK_TraceRefresh(device))
+        MGVK_TRACE(frame.trace.AcquireAttemptId = MGVK_TraceId(); frame.trace.FrameSequence = 0; frame.trace.Flags = 0)
+        MGVK_TRACE_SETUP(traceAcquire, MGVK_TraceContext(device, &frame))
+        MGVK_TRACE(traceAcquire.TimeoutNs = UINT64_C(10000000); MGVK_TraceRecord(traceAcquire, MGG_TRACE_ACQUIRE_BEGIN))
+		res = vkAcquireNextImageKHR(device->device, device->swapchain,
+#if defined(__ANDROID__)
+            UINT64_C(10000000),
+#else
+            UINT64_MAX,
+#endif
 			frame.imageAcquiredSemaphore, VK_NULL_HANDLE, &frame.image_index);
+        MGVK_TRACE(if ((res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR) && frame.image_index < device->swapchains.size()) { frame.trace.FrameSequence = MGVK_TraceId(); traceAcquire.FrameSequence = frame.trace.FrameSequence; traceAcquire.ImageIndex = frame.image_index; traceAcquire.Flags |= MGG_TRACE_IMAGE_VALID; } MGVK_TraceRecord(traceAcquire, MGG_TRACE_ACQUIRE_END, true, res))
+#if defined(__ANDROID__)
+        if (res == VK_TIMEOUT || res == VK_NOT_READY)
+        {
+            frame.image_index = UINT32_MAX;
+            return false;
+        }
+        if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_ERROR_SURFACE_LOST_KHR)
+        {
+            frame.image_index = UINT32_MAX;
+            device->androidSurfaceLost = res == VK_ERROR_SURFACE_LOST_KHR;
+            device->androidNeedsSwapchain = true;
+            return false;
+        }
+        if (res == VK_SUBOPTIMAL_KHR)
+        {
+            device->androidNeedsSwapchain = true;
+        }
+        else
+#endif
 		VK_CHECK_RESULT(res);
 		frame.imageAcquiredPending = true;
 	}
 
-	// This should be cleared by now.
+#if !defined(__ANDROID__)
+
+	// Android resets only immediately before a guaranteed submit. An acquired
+    // frame abandoned for lifecycle retirement must never leave a waitable fence.
 	res = vkResetFences(device->device, 1, &frame.completedFence);
 	VK_CHECK_RESULT(res);
+#endif
+#if defined(__ANDROID__)
+    return device->swapchain != VK_NULL_HANDLE && frame.image_index != UINT32_MAX;
+#else
+    return true;
+#endif
 }
 
 void MGVK_PrepareFrame(MGG_GraphicsDevice* device)
@@ -2348,7 +2710,10 @@ void MGVK_PrepareFrame(MGG_GraphicsDevice* device)
 
 	// This is only here for the first frame or for after the
 	// swapchain is resized...  normally this occurs on Present.
-	MGVK_TryAcquireSwap(device, frame);
+    if (!MGVK_TryAcquireSwap(device, frame))
+    {
+        return;
+    }
 
 	// Cleanup resources from the last time this frame was rendered.
 	MGVK_ProcessDescriptorCaches(device, device->frame);
@@ -2366,6 +2731,7 @@ void MGVK_PrepareFrame(MGG_GraphicsDevice* device)
 	}
 
 	MGVK_BeginCommandBuffer(frame.commandBuffer);
+    MGVK_TRACE(MGVK_TraceFrameCommand(device, frame))
 
 	//device->dynamicOffsets[0] = 0;
 	//device->dynamicOffsets[1] = 0;
@@ -2376,11 +2742,62 @@ void MGVK_PrepareFrame(MGG_GraphicsDevice* device)
 	MGG_GraphicsDevice_SetRenderTargets(device, nullptr, nullptr, 0);
 }
 
+#if defined(__ANDROID__)
+mgbyte MGG_GraphicsDevice_ProcessAndroidLifecycle(MGG_GraphicsDevice* device, mgbyte prepare)
+{
+    if (!MGVK_ApplyAndroidLifecycle(device))
+    {
+        MGVK_TRACE(MGVK_TraceRecord(MGVK_TraceContext(device), MGG_TRACE_LIFECYCLE_SKIP, false, 0, MGG_TRACE_SKIP_LIFECYCLE))
+        return false;
+    }
+    if (!prepare)
+    {
+
+        // Lifecycle retirement may have discarded a recording frame even when
+        // the latest state is already ready again. Clear the managed cached
+        // frame token unless a native command buffer still owns that recording.
+        return !device->frames.empty() && device->frames[device->frameIndex].is_recording;
+    }
+    if (device->androidSurfaceLost)
+    {
+        if (!MGVK_RetireAndroidSurface(device))
+        {
+            MGVK_TRACE(MGVK_TraceRecord(MGVK_TraceContext(device), MGG_TRACE_LIFECYCLE_SKIP, false, 0, MGG_TRACE_SKIP_LIFECYCLE))
+        return false;
+        }
+        device->androidSurfaceLost = false;
+    }
+    if (device->androidNeedsSwapchain || device->swapchain == VK_NULL_HANDLE)
+    {
+        MGVK_RecreateSwapChain(device, device->window, device->swapchainWidth,
+            device->swapchainHeight, device->colorFormat, device->depthFormat,
+            device->multiSampleCount, device->syncInterval);
+    }
+    if (device->swapchain == VK_NULL_HANDLE || !MGVK_ApplyAndroidLifecycle(device))
+    {
+        MGVK_TRACE(MGVK_TraceRecord(MGVK_TraceContext(device), MGG_TRACE_LIFECYCLE_SKIP, false, 0, MGG_TRACE_SKIP_LIFECYCLE))
+        return false;
+    }
+    if (!device->frames[device->frameIndex].is_recording)
+    {
+        MGVK_PrepareFrame(device);
+    }
+    return device->frames[device->frameIndex].is_recording;
+}
+#endif
+
 mgint MGG_GraphicsDevice_BeginFrame(MGG_GraphicsDevice* device)
 {
 	assert(device != nullptr);
 
-	// We do nothing here... everything is handled in Present().
+#if defined(__ANDROID__)
+    if (!MGG_GraphicsDevice_ProcessAndroidLifecycle(device, true))
+    {
+        MGVK_TRACE(auto traceReturn = MGVK_TraceContext(device); traceReturn.NativeReturnValue = UINT64_MAX; traceReturn.Flags |= MGG_TRACE_NATIVE_RETURN_VALID; MGVK_TraceRecord(traceReturn, MGG_TRACE_BEGIN_FRAME_RETURN, false, 0, MGG_TRACE_SKIP_NO_VALID_FRAME))
+        return -1;
+    }
+#endif
+    MGVK_TRACE(auto traceReturn = MGVK_TraceContext(device, &device->frames[device->frameIndex]); traceReturn.NativeReturnValue = device->frameIndex; traceReturn.Flags |= MGG_TRACE_NATIVE_RETURN_VALID; MGVK_TraceRecord(traceReturn, MGG_TRACE_BEGIN_FRAME_RETURN))
 	return device->frameIndex;
 }
 
@@ -2639,10 +3056,13 @@ void MGVK_WaitPendingTransfers(MGG_GraphicsDevice* device, MGG_Texture* texture)
 			continue;
 		}
 
-		vkWaitForFences(device->device, 1, &pending.done, VK_TRUE, UINT64_MAX);
+		MGVK_TRACE(MGVK_TraceFence(device, pending.done, MGG_TRACE_FENCE_WAIT_BEGIN))
+		MGVK_TRACE_IGNORE(vkWaitForFences(device->device, 1, &pending.done, VK_TRUE, UINT64_MAX), MGVK_TraceFence(device, pending.done, MGG_TRACE_FENCE_WAIT_RESULT, true, traceResult));
 
+		MGVK_TRACE(MGVK_TraceFreeResource(device, pending.cmd, VK_NULL_HANDLE))
 		vkFreeCommandBuffers(device->device, device->transferPool, 1, &pending.cmd);
 		vmaDestroyBuffer(device->allocator, pending.staging.buffer, pending.staging.allocation);
+		MGVK_TRACE(MGVK_TraceFreeResource(device, VK_NULL_HANDLE, pending.done))
 		vkDestroyFence(device->device, pending.done, nullptr);
 
 		transfers[i] = transfers.back();
@@ -2659,14 +3079,17 @@ void MGVK_CleanupPendingTransfers(MGG_GraphicsDevice* device)
 	{
 		auto& pending = transfers[i];
 		VkResult res = vkGetFenceStatus(device->device, pending.done);
+        MGVK_TRACE(MGVK_TraceFence(device, pending.done, MGG_TRACE_FENCE_STATUS_RESULT, true, res))
 		if (res == VK_NOT_READY)
 		{
 			i++;
 			continue;
 		}
 
+		MGVK_TRACE(MGVK_TraceFreeResource(device, pending.cmd, VK_NULL_HANDLE))
 		vkFreeCommandBuffers(device->device, device->transferPool, 1, &pending.cmd);
 		vmaDestroyBuffer(device->allocator, pending.staging.buffer, pending.staging.allocation);
+		MGVK_TRACE(MGVK_TraceFreeResource(device, VK_NULL_HANDLE, pending.done))
 		vkDestroyFence(device->device, pending.done, nullptr);
 
 		transfers[i] = transfers.back();
@@ -2685,6 +3108,20 @@ void MGG_GraphicsDevice_Present(MGG_GraphicsDevice* device, mgint currentFrame, 
 	assert(device != nullptr);
 	assert(syncInterval >= 0);
 	assert(currentFrame >= 0);
+
+MGVK_TRACE(MGVK_TraceRecord(MGVK_TraceContext(device), MGG_TRACE_PRESENT_BEGIN))
+#if defined(__ANDROID__)
+    MGVK_TRACE_META(uint32_t traceSkip = MGG_TRACE_SKIP_NONE;)
+    if (MGVK_TRACE_SKIP_IF(!MGVK_ApplyAndroidLifecycle(device), MGG_TRACE_SKIP_LIFECYCLE) ||
+        MGVK_TRACE_SKIP_IF(device->swapchain == VK_NULL_HANDLE, MGG_TRACE_SKIP_NO_SWAPCHAIN) ||
+        MGVK_TRACE_SKIP_IF(device->frames.empty(), MGG_TRACE_SKIP_NO_FRAMES) ||
+        MGVK_TRACE_SKIP_IF(!device->frames[device->frameIndex].is_recording, MGG_TRACE_SKIP_NO_RECORDING))
+    {
+        MGVK_TRACE(MGVK_TraceRecord(MGVK_TraceContext(device), MGG_TRACE_PRESENT_SKIP, false, 0, traceSkip))
+        MGVK_TRACE(MGVK_TraceRecord(MGVK_TraceContext(device), MGG_TRACE_PRESENT_RETURN, false, 0, traceSkip))
+        return;
+    }
+#endif
 	assert((device->frame % device->swapchainCount) == currentFrame);
 
 
@@ -2693,6 +3130,7 @@ void MGG_GraphicsDevice_Present(MGG_GraphicsDevice* device, mgint currentFrame, 
 	auto& frame = device->frames[device->frameIndex];
 	assert(frame.is_recording);
 	auto& swap = device->swapchains[frame.image_index];
+    MGVK_TRACE_SETUP(traceReturn, MGVK_TraceContext(device, &frame))
 
 	MGVK_EndRenderPass(device, frame.commandBuffer);
 
@@ -2702,6 +3140,7 @@ void MGG_GraphicsDevice_Present(MGG_GraphicsDevice* device, mgint currentFrame, 
 		std::lock_guard lock(device->queueMutex);
 
 		res = vkEndCommandBuffer(frame.commandBuffer);
+        MGVK_TRACE(MGVK_TraceRecord(MGVK_TraceContext(device, &frame), MGG_TRACE_COMMAND_END_RESULT, true, res))
 		VK_CHECK_RESULT(res);
 		frame.is_recording = false;
 
@@ -2717,7 +3156,14 @@ void MGG_GraphicsDevice_Present(MGG_GraphicsDevice* device, mgint currentFrame, 
 		submitInfo.pCommandBuffers = &frame.commandBuffer;
 		submitInfo.signalSemaphoreCount = 1;
 		submitInfo.pSignalSemaphores = &swap.renderCompleteSemaphore;
+#if defined(__ANDROID__)
+        res = vkResetFences(device->device, 1, &frame.completedFence);
+        MGVK_TRACE(MGVK_TraceResetFence(device, frame, res))
+        VK_CHECK_RESULT(res);
+#endif
+		MGVK_TRACE_SETUP(traceFinal, MGVK_TraceSubmission(device, frame.commandBuffer, frame.completedFence, &frame, MGG_TRACE_PRESENT_FINAL, submitInfo.waitSemaphoreCount, 1))
 		res = vkQueueSubmit(device->queue, 1, &submitInfo, frame.completedFence);
+        MGVK_TRACE(traceReturn = traceFinal; MGVK_TraceSubmitted(device, frame.completedFence, traceFinal, res))
 		VK_CHECK_RESULT(res);
 		frame.imageAcquiredPending = false;
 
@@ -2727,7 +3173,9 @@ void MGG_GraphicsDevice_Present(MGG_GraphicsDevice* device, mgint currentFrame, 
 		presentInfo.swapchainCount = 1;
 		presentInfo.pSwapchains = &device->swapchain;
 		presentInfo.pImageIndices = &frame.image_index;
+		MGVK_TRACE(MGVK_TraceRecord(traceFinal, MGG_TRACE_QUEUE_PRESENT_BEGIN))
 		res = vkQueuePresentKHR(device->queue, &presentInfo);
+        MGVK_TRACE(MGVK_TraceRecord(traceFinal, MGG_TRACE_QUEUE_PRESENT_RESULT, true, res))
 	}
 
 	// Recreation can replace the frame vector, so finish tracking this submission first.
@@ -2741,8 +3189,16 @@ void MGG_GraphicsDevice_Present(MGG_GraphicsDevice* device, mgint currentFrame, 
 		MGVK_CleanupPendingTransfers(device);
 	}
 
-	if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR)
+	if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR
+#if defined(__ANDROID__)
+        || res == VK_ERROR_SURFACE_LOST_KHR
+#endif
+    )
 	{
+#if defined(__ANDROID__)
+        device->androidSurfaceLost = res == VK_ERROR_SURFACE_LOST_KHR;
+        device->androidNeedsSwapchain = true;
+#else
 		// This will happen if the window is minimized too.
 
 		if (res == VK_SUBOPTIMAL_KHR)
@@ -2754,6 +3210,7 @@ void MGG_GraphicsDevice_Present(MGG_GraphicsDevice* device, mgint currentFrame, 
 				
 		if (device->swapchain == VK_NULL_HANDLE)
 			printf("Couldn't recreate swapchain!\n");
+#endif
 	}
 	else
 	{
@@ -2789,10 +3246,13 @@ void MGG_GraphicsDevice_Present(MGG_GraphicsDevice* device, mgint currentFrame, 
 		++device->frame;
 		device->frameIndex = device->frame % device->swapchainCount;
 
-		// Get the next swap frame here so that any blocking
-		// waiting for the GPU to finish occurs during Present.
+#if !defined(__ANDROID__)
+
+		// Desktop keeps its speculative next-frame acquisition.
 		MGVK_PrepareFrame(device);
+#endif
 	}
+    MGVK_TRACE(MGVK_TraceRecord(traceReturn, MGG_TRACE_PRESENT_RETURN))
 }
 
 void MGG_GraphicsDevice_SetBlendState(MGG_GraphicsDevice* device, MGG_BlendState* state, mgfloat factorR, mgfloat factorG, mgfloat factorB, mgfloat factorA)
@@ -4085,6 +4545,7 @@ void MGG_GraphicsDevice_Draw(MGG_GraphicsDevice* device, MGPrimitiveType primiti
 	MGVK_UpdatePipeline(device, frame.commandBuffer, device->frame);
 
 	vkCmdDraw(frame.commandBuffer, vertexCount, 1, vertexStart, 0);
+    MGVK_TRACE(++frame.trace.DrawCommandCount)
 }
 
 void MGG_GraphicsDevice_DrawIndexed(MGG_GraphicsDevice* device, MGPrimitiveType primitiveType, mgint primitiveCount, mgint indexStart, mgint vertexStart)
@@ -4120,6 +4581,7 @@ void MGG_GraphicsDevice_DrawIndexed(MGG_GraphicsDevice* device, MGPrimitiveType 
 	auto indexCount = MGVK_GetIndexCount(primitiveType, primitiveCount);
 
 	vkCmdDrawIndexed(frame.commandBuffer, indexCount, 1, indexStart, vertexStart, 0);
+    MGVK_TRACE(++frame.trace.DrawCommandCount)
 }
 
 void MGG_GraphicsDevice_DrawIndexedInstanced(
@@ -4166,6 +4628,7 @@ void MGG_GraphicsDevice_DrawIndexedInstanced(
 		indexStart,       
 		vertexStart,      
 		0);               
+    MGVK_TRACE(++frame.trace.DrawCommandCount)
 }
 
 inline mgint getMipScalar(mgint level, mgint value)
@@ -4388,7 +4851,14 @@ void MGG_GraphicsDevice_GetBackBufferData(MGG_GraphicsDevice* device, mgint x, m
 	auto& frame = device->frames[device->frameIndex];
 	assert(frame.is_recording);
 
-	MGVK_FlushCommands(device, frame);
+	MGVK_TRACE_SETUP(traceReadback, MGVK_TraceContext(device, &frame))
+    MGVK_TRACE(traceReadback.OperationId = MGVK_TraceId(); traceReadback.WorkKind = MGG_TRACE_BACKBUFFER_READBACK; MGVK_TraceRecord(traceReadback, MGG_TRACE_BACKBUFFER_READBACK_BEGIN))
+    MGVK_TRACE_META({)
+    MGVK_TRACE_META(std::optional<MGVK_TraceScope> traceScope;)
+    MGVK_TRACE(traceScope.emplace(traceReadback))
+    MGVK_TRACE(MGVK_TraceParent.WorkKind = MGG_TRACE_READBACK_RENDER_FLUSH)
+    MGVK_FlushCommands(device, frame);
+    MGVK_TRACE_META(})
 
 	auto sourceTexture = device->swapchains[frame.image_index].texture;
 	auto srcImage = sourceTexture->image;
@@ -4451,7 +4921,12 @@ void MGG_GraphicsDevice_GetBackBufferData(MGG_GraphicsDevice* device, mgint x, m
 		vkCmdCopyImageToBuffer(copyCmdBuffer, tempRgbaTexture->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dstBuffer, 1, &copyRegion);
 	}
 
+    MGVK_TRACE_META({)
+    MGVK_TRACE_META(std::optional<MGVK_TraceScope> traceScope;)
+    MGVK_TRACE(traceScope.emplace(traceReadback))
+    MGVK_TRACE(MGVK_TraceParent.WorkKind = MGG_TRACE_READBACK_COPY)
     MGVK_ExecuteAndFreeCommandBuffer(device, copyCmdBuffer);
+    MGVK_TRACE_META(})
 
 	VK_CHECK_RESULT(vmaInvalidateAllocation(device->allocator, dstBufferAllocation, 0, VK_WHOLE_SIZE));
 	assert(dstAllocInfo.pMappedData != nullptr);
@@ -4471,7 +4946,9 @@ void MGG_GraphicsDevice_GetBackBufferData(MGG_GraphicsDevice* device, mgint x, m
 	delete tempRgbaTexture;
 
 	MGVK_BeginCommandBuffer(frame.commandBuffer);
+    MGVK_TRACE(MGVK_TraceFrameCommand(device, frame))
 	frame.is_recording = true;
+    MGVK_TRACE(MGVK_TraceReadbackRestart = frame.trace.CommandRecordingId; MGVK_TraceRecord(traceReadback, MGG_TRACE_BACKBUFFER_READBACK_END))
 }
 
 static VkBlendFactor ToVkBlendFactor(MGBlend mode)
@@ -5569,10 +6046,10 @@ void MGG_Texture_SetData(MGG_GraphicsDevice* device, MGG_Texture* texture, mgint
 		VkFenceCreateInfo fenceCreateInfo = {};
 		fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 		fenceCreateInfo.flags = 0;
-		vkCreateFence(device->device, &fenceCreateInfo, nullptr, &transfer.done);
+		MGVK_TRACE_IGNORE(vkCreateFence(device->device, &fenceCreateInfo, nullptr, &transfer.done), MGVK_TraceResourceEvent(device, VK_NULL_HANDLE, traceResult == VK_SUCCESS ? transfer.done : VK_NULL_HANDLE, MGG_TRACE_FENCE_CREATE_RESULT, traceResult));
 		VK_SET_OBJECT_NAME(device->device, transfer.done, VK_OBJECT_TYPE_FENCE, "MGVK_Transfer.done");
 
-		vkEndCommandBuffer(cmd);
+		MGVK_TRACE_IGNORE(vkEndCommandBuffer(cmd), MGVK_TraceRecord(MGVK_TraceContext(device), MGG_TRACE_COMMAND_END_RESULT, true, traceResult));
 
 		std::lock_guard lock2(device->queueMutex);
 		VkSubmitInfo submit = {};
@@ -5581,7 +6058,8 @@ void MGG_Texture_SetData(MGG_GraphicsDevice* device, MGG_Texture* texture, mgint
 		submit.commandBufferCount = 1;
 		submit.pCommandBuffers = &cmd;
 		submit.signalSemaphoreCount = 0;
-		vkQueueSubmit(device->queue, 1, &submit, transfer.done);
+		MGVK_TRACE_SETUP(traceTransfer, MGVK_TraceSubmission(device, cmd, transfer.done, nullptr, MGG_TRACE_TEXTURE_OR_BUFFER_TRANSFER, 0, 0))
+		MGVK_TRACE_IGNORE(vkQueueSubmit(device->queue, 1, &submit, transfer.done), MGVK_TraceSubmitted(device, transfer.done, traceTransfer, traceResult));
 
 		device->pendingTransfers.push_back(transfer);
 	}
@@ -5638,6 +6116,7 @@ void MGG_Texture_GetData(MGG_GraphicsDevice* device, MGG_Texture* texture, mgint
 	if (restart_frame)
 	{
 		MGVK_BeginCommandBuffer(frame.commandBuffer);
+    MGVK_TRACE(MGVK_TraceFrameCommand(device, frame))
 		frame.is_recording = true;
 	}
 }
@@ -5965,6 +6444,7 @@ void MGG_OcclusionQuery_End(MGG_GraphicsDevice* device, MGG_OcclusionQuery* quer
 
 	MGVK_FlushCommands(device, frame);
 	MGVK_BeginCommandBuffer(frame.commandBuffer);
+    MGVK_TRACE(MGVK_TraceFrameCommand(device, frame))
 	frame.is_recording = true;
 }
 

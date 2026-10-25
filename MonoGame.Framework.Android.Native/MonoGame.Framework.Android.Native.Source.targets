@@ -1,0 +1,10 @@
+<Project>
+  <!-- Source consumers import this file in the app, where the Android SDK keeps
+       the selected RID. ProjectReference builds of libraries are RID-independent. -->
+  <Import Project="$(MSBuildThisFileDirectory)../src/NuGetPackages/MonoGame.Runtime.Android.Vulkan/buildTransitive/MonoGame.Runtime.Android.Vulkan.targets" />
+  <!-- The SDK can extract an AAR's proguard.txt without adding it to the app's
+       R8 inputs. Binding builds already declare this file in their project. -->
+  <ItemGroup Condition="'$(IsBindingProject)' != 'true'">
+    <ProguardConfiguration Include="$(MSBuildThisFileDirectory)sdl2.proguard" />
+  </ItemGroup>
+</Project>

@@ -387,7 +387,7 @@ namespace Microsoft.Xna.Framework.Content
                 // This is primarily for editor support.
                 // Setting the RootDirectory to an absolute path is useful in editor
                 // situations, but TitleContainer can ONLY be passed relative paths.
-#if DESKTOPGL || WINDOWS
+#if DESKTOPGL || WINDOWS || NATIVE
                 if (Path.IsPathRooted(assetPath))
                     stream = File.OpenRead(assetPath);
                 else
@@ -568,7 +568,7 @@ namespace Microsoft.Xna.Framework.Content
                 Stream stream = null;
 
                 // Handle absolute paths the same way as XNB loading
-#if DESKTOPGL || WINDOWS
+#if DESKTOPGL || WINDOWS || NATIVE
                 if (Path.IsPathRooted(assetPath))
                     stream = File.OpenRead(assetPath);
                 else

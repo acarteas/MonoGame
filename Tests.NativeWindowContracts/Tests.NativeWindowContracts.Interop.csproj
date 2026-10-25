@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="InteropProgram.cs" />
+    <Compile Include="../MonoGame.Framework/Platform/Native/Platform.Interop.cs" Link="Platform.Interop.cs" />
+    <Compile Include="../MonoGame.Framework/Platform/Native/MGHandleAttribute.cs" Link="MGHandleAttribute.cs" />
+    <Compile Include="../MonoGame.Framework/Utilities/MonoGamePlatform.cs" Link="MonoGamePlatform.cs" />
+    <Compile Include="../MonoGame.Framework/Utilities/GraphicsBackend.cs" Link="GraphicsBackend.cs" />
+    <Compile Include="../MonoGame.Framework/GameRunBehavior.cs" Link="GameRunBehavior.cs" />
+    <Compile Include="../MonoGame.Framework/Input/Keys.cs" Link="Keys.cs" />
+    <Compile Include="../MonoGame.Framework/Input/GamePadType.cs" Link="GamePadType.cs" />
+  </ItemGroup>
+</Project>

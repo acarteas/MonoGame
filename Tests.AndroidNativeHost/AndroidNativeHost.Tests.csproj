@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>MonoGame.Framework.Android.Native</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../MonoGame.Framework.Android.Native/AndroidNativeRunSession.cs" Link="AndroidNativeRunSession.cs" />
+    <Compile Include="../MonoGame.Framework.Android.Native/AndroidNativeActivityOwner.cs" Link="AndroidNativeActivityOwner.cs" />
+    <Compile Include="../MonoGame.Framework.Android.Native/AndroidNativeGameLifecycle.cs" Link="AndroidNativeGameLifecycle.cs" />
+    <Compile Include="../MonoGame.Framework.Android.Native/AndroidNativeSurfaceLifecycle.cs" Link="AndroidNativeSurfaceLifecycle.cs" />
+    <ProjectReference Include="../MonoGame.Framework/MonoGame.Framework.Native.csproj" />
+  </ItemGroup>
+</Project>

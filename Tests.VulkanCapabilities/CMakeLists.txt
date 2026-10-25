@@ -1,0 +1,22 @@
+cmake_minimum_required(VERSION 3.22)
+project(VulkanSnapshotTests LANGUAGES CXX)
+if(NOT IS_ABSOLUTE "${MONOGAME_RUNTIME}")
+    message(FATAL_ERROR "Pass the current built mgruntime absolute path")
+endif()
+add_executable(vulkan_snapshot_native_tests NativeTests.cpp)
+target_compile_features(vulkan_snapshot_native_tests PRIVATE cxx_std_17)
+target_include_directories(vulkan_snapshot_native_tests PRIVATE ../native/monogame/include)
+target_link_libraries(vulkan_snapshot_native_tests PRIVATE "${MONOGAME_RUNTIME}")
+enable_testing()
+add_test(NAME vulkan_snapshot_native COMMAND vulkan_snapshot_native_tests)
+
+# Test the same private scalar helpers with fake resources and no Vulkan driver.
+add_executable(vulkan_offscreen_snapshot_tests OffscreenTests.cpp)
+target_compile_features(vulkan_offscreen_snapshot_tests PRIVATE cxx_std_17)
+target_include_directories(vulkan_offscreen_snapshot_tests PRIVATE
+    ../native/monogame/include ../native/monogame/external/vulkan-headers/include)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(vulkan_offscreen_snapshot_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(vulkan_offscreen_snapshot_tests PRIVATE -fsanitize=address,undefined)
+endif()
+add_test(NAME vulkan_offscreen_snapshot COMMAND vulkan_offscreen_snapshot_tests)

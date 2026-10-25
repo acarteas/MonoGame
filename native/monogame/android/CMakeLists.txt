@@ -1,0 +1,112 @@
+cmake_minimum_required(VERSION 3.22)
+project(MonoGameAndroidNative LANGUAGES C CXX)
+
+# Only the official NDK toolchain is supported. Keep direct CMake invocations
+# subject to the same ABI/API/configuration contract as build.sh.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/toolchain.json" toolchain_json)
+string(JSON expected_api GET "${toolchain_json}" minApi)
+string(JSON expected_ndk GET "${toolchain_json}" ndkRevision)
+if(NOT ANDROID OR NOT ANDROID_PLATFORM_LEVEL STREQUAL "${expected_api}")
+    message(FATAL_ERROR "Use the Android NDK toolchain with API ${expected_api}")
+endif()
+file(STRINGS "${CMAKE_ANDROID_NDK}/source.properties" ndk_revision REGEX "^Pkg.Revision")
+string(REGEX REPLACE "^[^=]*=[ \t]*" "" ndk_revision "${ndk_revision}")
+string(STRIP "${ndk_revision}" ndk_revision)
+if(NOT ndk_revision STREQUAL expected_ndk)
+    message(FATAL_ERROR "NDK ${expected_ndk} is required")
+endif()
+if(NOT ANDROID_ABI MATCHES "^(x86_64|arm64-v8a)$" OR
+   NOT CMAKE_BUILD_TYPE MATCHES "^(Debug|Release)$")
+    message(FATAL_ERROR "Expected x86_64/arm64-v8a and Debug/Release")
+endif()
+if(NOT ANDROID_STL STREQUAL "c++_shared")
+    message(FATAL_ERROR "ANDROID_STL must be c++_shared")
+endif()
+if(NOT IS_ABSOLUTE "${MONOGAME_ARTIFACT_DIR}")
+    message(FATAL_ERROR "MONOGAME_ARTIFACT_DIR must be an external absolute directory")
+endif()
+file(REAL_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../.." checkout_root)
+# Artifacts may not exist yet. Resolve the nearest existing ancestor so aliases
+# into the checkout are still caught before the first output directory is made.
+set(artifact_ancestor "${MONOGAME_ARTIFACT_DIR}")
+set(artifact_suffix "")
+while(NOT EXISTS "${artifact_ancestor}")
+    cmake_path(GET artifact_ancestor FILENAME artifact_name)
+    cmake_path(GET artifact_ancestor PARENT_PATH artifact_parent)
+    if(artifact_ancestor STREQUAL artifact_parent)
+        message(FATAL_ERROR "Cannot resolve MONOGAME_ARTIFACT_DIR")
+    endif()
+    set(artifact_suffix "/${artifact_name}${artifact_suffix}")
+    set(artifact_ancestor "${artifact_parent}")
+endwhile()
+file(REAL_PATH "${artifact_ancestor}" artifact_root)
+string(APPEND artifact_root "${artifact_suffix}")
+file(REAL_PATH "${CMAKE_BINARY_DIR}" binary_root)
+cmake_path(IS_PREFIX checkout_root "${artifact_root}" NORMALIZE artifact_in_source)
+cmake_path(IS_PREFIX checkout_root "${binary_root}" NORMALIZE binary_in_source)
+if(artifact_in_source OR binary_in_source)
+    message(FATAL_ERROR "Android binary and artifact directories must be outside the MonoGame checkout")
+endif()
+
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${MONOGAME_ARTIFACT_DIR}")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lib")
+
+# Configure the existing sources, without package discovery or host libraries.
+set(SDL_SHARED ON CACHE BOOL "" FORCE)
+set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+set(SDL_TEST OFF CACHE BOOL "" FORCE)
+set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+set(SDL2_DISABLE_SDL2MAIN ON CACHE BOOL "" FORCE)
+set(SDL2_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
+set(SDL_CCACHE OFF CACHE BOOL "" FORCE)
+foreach(subsystem AUDIO VIDEO EVENTS JOYSTICK HAPTIC SENSOR LOADSO THREADS)
+    set(SDL_${subsystem} ON CACHE BOOL "" FORCE)
+endforeach()
+set(SDL_VULKAN ON CACHE BOOL "" FORCE)
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../external/sdl2/sdl" sdl2)
+target_link_options(SDL2 PRIVATE "-Wl,-z,max-page-size=16384")
+
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(BUILD_SDL3 OFF CACHE BOOL "" FORCE)
+set(BUILD_UTILS OFF CACHE BOOL "" FORCE)
+set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(FAUDIO_INSTALL OFF CACHE BOOL "" FORCE)
+set(SDL2_INCLUDE_DIRS "${CMAKE_CURRENT_BINARY_DIR}/sdl2/include/SDL2")
+set(SDL2_LIBRARIES SDL2::SDL2)
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../external/faudio" faudio)
+set_target_properties(FAudio-static PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# The paths are generated from targets rather than guessed library suffixes.
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/dependency-paths.json" CONTENT
+    "{\n  \"sdl2\": \"$<TARGET_FILE:SDL2>\",\n  \"faudio\": \"$<TARGET_FILE:FAudio-static>\"\n}\n")
+
+# Build the existing Native renderer; SDL remains shared and FAudio is embedded.
+if(NOT IS_ABSOLUTE "${MONOGAME_SHADER_DIR}" OR
+   NOT EXISTS "${MONOGAME_SHADER_DIR}/shader-manifest.json")
+    message(FATAL_ERROR "Generate host Vulkan effects with build.sh before configuring mgruntime")
+endif()
+file(REAL_PATH "${MONOGAME_SHADER_DIR}" shader_root)
+cmake_path(IS_PREFIX checkout_root "${shader_root}" NORMALIZE shaders_in_source)
+if(shaders_in_source)
+    message(FATAL_ERROR "Generated Vulkan effects must be outside the MonoGame checkout")
+endif()
+set(runtime_root "${CMAKE_CURRENT_SOURCE_DIR}/..")
+file(GLOB runtime_sources CONFIGURE_DEPENDS
+    "${runtime_root}/common/*.cpp" "${runtime_root}/sdl/*.cpp"
+    "${runtime_root}/vulkan/*.cpp" "${runtime_root}/faudio/*.cpp")
+add_library(mgruntime SHARED ${runtime_sources} "${CMAKE_CURRENT_SOURCE_DIR}/host.cpp")
+target_compile_features(mgruntime PRIVATE cxx_std_17)
+target_compile_definitions(mgruntime PRIVATE MG_SDL2 MG_VULKAN MG_FAUDIO DLL_EXPORT
+    $<$<CONFIG:Debug>:DEBUG>)
+target_include_directories(mgruntime PRIVATE
+    "${MONOGAME_SHADER_DIR}" "${runtime_root}/include"
+    "${runtime_root}/../../external/stb"
+    "${runtime_root}/external/volk" "${runtime_root}/external/vma/include")
+target_link_libraries(mgruntime PRIVATE SDL2::SDL2 FAudio-static android log dl)
+target_link_options(mgruntime PRIVATE "-Wl,--no-undefined" "-Wl,-z,max-page-size=16384")
+# Release artifacts also retain symbols externally; packaging may strip later.
+target_compile_options(mgruntime PRIVATE -g)
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/runtime-paths.json" CONTENT
+    "{\n  \"mgruntime\": \"$<TARGET_FILE:mgruntime>\"\n}\n")

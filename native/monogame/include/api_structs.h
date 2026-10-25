@@ -225,6 +225,17 @@ struct MGP_ControllerEvent
     mgshort Value;
 };
 
+struct MGP_AndroidLifecycle
+{
+    mgulong SessionId;
+    mgulong Generation;
+    mgulong Revision;
+    mgulong RetireRevision;
+    mgulong AcknowledgedRevision;
+    mguint Flags;
+    mguint Reserved;
+};
+
 #pragma pack(push,1)
 struct MGP_Event
 {
@@ -238,6 +249,7 @@ union {
     MG_FIELD_OFFSET(12, MGP_DropEvent, Drop);
     MG_FIELD_OFFSET(12, MGP_WindowEvent, Window);
     MG_FIELD_OFFSET(12, MGP_ControllerEvent, Controller);
+    MG_FIELD_OFFSET(12, MGP_AndroidLifecycle, AndroidLifecycle);
 };
 };
 #pragma pack(pop)

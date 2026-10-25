@@ -5,10 +5,12 @@
 using System;
 using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
+using Microsoft.Xna.Framework.Input.Touch;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using MonoGame.Interop;
 using System.Threading;
+using MonoGame.Framework.Utilities;
 
 namespace Microsoft.Xna.Framework;
 
@@ -29,8 +31,24 @@ class NativeGamePlatform : GamePlatform
 
     private int _isExiting;
 
+    private ulong _androidSessionId;
+    private ulong _androidInputRetireRevision;
+    private bool _androidInputActive = true;
+
+    private readonly bool _isAndroid = PlatformInfo.MonoGamePlatform == MonoGamePlatform.Android;
+
     public unsafe NativeGamePlatform(Game game) : base(game)
     {
+        if (_isAndroid)
+        {
+            GamePad.EnsureNativePlatformAvailable();
+            if (MGP.Android_GetLifecycle(0, out var lifecycle) != 0)
+            {
+                throw new InvalidOperationException("No owning Android Native host session.");
+            }
+            _androidSessionId = lifecycle.SessionId;
+        }
+
         GameRunBehavior behavior;
         Handle = MGP.Platform_Create(out behavior);
         if (Handle == null)
@@ -38,16 +56,46 @@ class NativeGamePlatform : GamePlatform
             throw new NoSuitableGraphicsDeviceException("Failed to initialize SDL platform!");
         }
 
-        DefaultRunBehavior = behavior;
+        try
+        {
+            if (_isAndroid)
+            {
+                GamePad.BindNativePlatform(this, Handle);
+            }
 
-        _window = new NativeGameWindow(this, true);
+            DefaultRunBehavior = behavior;
 
-        Window = _window;
+            _window = new NativeGameWindow(this, true);
 
-        Mouse.WindowHandle = _window.Handle;
-        MessageBox._window = _window._handle;
-        GamePad.Handle = Handle;
-        OnIsMouseVisibleChanged();
+            Window = _window;
+
+            Mouse.WindowHandle = _window.Handle;
+            MessageBox._window = _window._handle;
+            if (!_isAndroid)
+            {
+                GamePad.Handle = Handle;
+            }
+
+            OnIsMouseVisibleChanged();
+        }
+        catch
+        {
+            if (_isAndroid)
+            {
+                try
+                {
+                    Dispose(true);
+                }
+                catch
+                {
+
+                    // Preserve the constructor exception. Failed retirement keeps
+                    // its input owner reserved and its native handles unusable.
+                }
+            }
+
+            throw;
+        }
     }
 
     internal static unsafe MGG_GraphicsSystem* GraphicsSystem
@@ -80,6 +128,10 @@ class NativeGamePlatform : GamePlatform
 
         while (true)
         {
+            if (_isAndroid)
+            {
+                AndroidLifecycleCheckpoint();
+            }
             PollEvents();
 
             Game.Tick();
@@ -98,6 +150,12 @@ class NativeGamePlatform : GamePlatform
         MGP_Event event_;
         while (MGP.Platform_PollEvent(Handle, out event_) != 0)
         {
+            if (_isAndroid && !_androidInputActive &&
+                ((event_.Type >= EventType.KeyDown && event_.Type <= EventType.MouseWheel) ||
+                    event_.Type == EventType.ControllerStateChange))
+            {
+                continue;
+            }
             switch (event_.Type)
             {
                 case EventType.Quit:
@@ -105,11 +163,52 @@ class NativeGamePlatform : GamePlatform
                     break;
 
                 case EventType.WindowGainedFocus:
-                    IsActive = true;
+                    if (_isAndroid)
+                    {
+                        AndroidLifecycleCheckpoint();
+                    }
+                    else
+                    {
+                        IsActive = true;
+                    }
                     break;
 
                 case EventType.WindowLostFocus:
                     IsActive = false;
+                    if (_isAndroid)
+                    {
+                        ClearAndroidHeldInput();
+                    }
+                    break;
+
+                case EventType.AndroidLifecycle:
+                    if (_isAndroid && event_.AndroidLifecycle.SessionId == _androidSessionId)
+                    {
+                        AndroidLifecycleCheckpoint();
+                    }
+                    break;
+
+                case EventType.AppBackground:
+                    if (_isAndroid)
+                    {
+                        IsActive = false;
+                        ClearAndroidHeldInput();
+                    }
+                    break;
+
+                case EventType.AppForeground:
+                    if (_isAndroid)
+                    {
+                        AndroidLifecycleCheckpoint();
+                    }
+                    break;
+
+                case EventType.AppTerminating:
+                    if (_isAndroid)
+                    {
+                        ClearAndroidHeldInput();
+                        Game.Exit();
+                    }
                     break;
 
                 case EventType.WindowResized:
@@ -262,6 +361,56 @@ class NativeGamePlatform : GamePlatform
         }
     }
 
+    private unsafe void AndroidLifecycleCheckpoint()
+    {
+        if (MGP.Android_GetLifecycle(_androidSessionId, out var lifecycle) != 0)
+        {
+            ClearAndroidHeldInput();
+            Game.Exit();
+            return;
+        }
+        if (lifecycle.RetireRevision > _androidInputRetireRevision)
+        {
+            _androidInputRetireRevision = lifecycle.RetireRevision;
+            ClearAndroidHeldInput();
+        }
+        var device = (Game.Services.GetService(typeof(IGraphicsDeviceService)) as IGraphicsDeviceService)?.GraphicsDevice;
+        if (device != null)
+        {
+            device.AndroidLifecycleCheckpoint(false);
+        }
+        else
+        {
+            MGP.Android_AcknowledgeRetired(_androidSessionId, lifecycle.RetireRevision);
+        }
+        _androidInputActive = lifecycle.CanDraw;
+        IsActive = lifecycle.CanDraw;
+        if (!lifecycle.CanDraw)
+        {
+            ClearAndroidHeldInput();
+        }
+        if ((lifecycle.Flags & 4) != 0)
+        {
+            Game.Exit();
+        }
+    }
+
+    private unsafe void ClearAndroidHeldInput()
+    {
+        if (!GamePad.OwnsNativePlatform(this, Handle))
+        {
+            return;
+        }
+        Keyboard.Keys.Clear();
+        GamePad.NeutralizeNativePlatformInput(this, Handle);
+        _dropList.Clear();
+        if (_window != null)
+        {
+            _window.MouseState = default;
+            _window.TouchPanelState.ReleaseAllTouches();
+        }
+    }
+
     private bool ShouldExit()
     {
         if (    Keyboard.Keys.Contains(Keys.F4) &&
@@ -313,7 +462,14 @@ class NativeGamePlatform : GamePlatform
 
     public override unsafe bool BeforeDraw(GameTime gameTime)
     {
-        return MGP.Platform_BeforeDraw(Handle) == 0 ? false : true;
+        if (_isAndroid)
+        {
+            AndroidLifecycleCheckpoint();
+            var device = (Game.Services.GetService(typeof(IGraphicsDeviceService)) as IGraphicsDeviceService)?.GraphicsDevice;
+            return _androidInputActive && MGP.Platform_BeforeDraw(Handle) != 0 &&
+                device != null && device.AndroidLifecycleCheckpoint(true);
+        }
+        return MGP.Platform_BeforeDraw(Handle) != 0;
     }
 
     public override unsafe void EnterFullScreen()
@@ -344,6 +500,35 @@ class NativeGamePlatform : GamePlatform
 
     protected unsafe override void Dispose(bool disposing)
     {
+        if (_isAndroid)
+        {
+            if (IsDisposed || !GamePad.OwnsNativePlatform(this, Handle))
+            {
+                return;
+            }
+
+            GamePad.ClearNativePlatformInput(this, Handle);
+            Keyboard.Keys.Clear();
+            if (_window != null)
+            {
+                _window.MouseState = default;
+                if (ReferenceEquals(Mouse.PrimaryWindow, _window))
+                {
+                    Mouse.PrimaryWindow = null;
+                }
+
+                if (ReferenceEquals(TouchPanel.PrimaryWindow, _window))
+                {
+                    TouchPanel.PrimaryWindow = null;
+                }
+
+                if (MessageBox._window == _window._handle)
+                {
+                    MessageBox._window = null;
+                }
+            }
+        }
+
         if (_window != null)
         {
             _window.Destroy();
@@ -359,8 +544,13 @@ class NativeGamePlatform : GamePlatform
 
         if (Handle != null)
         {
+            var retiredHandle = Handle;
             MGP.Platform_Destroy(Handle);
             Handle = null;
+            if (_isAndroid)
+            {
+                GamePad.CompleteNativePlatformRetirement(this, retiredHandle);
+            }
         }
 
         base.Dispose(disposing);

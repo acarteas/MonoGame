@@ -1,0 +1,81 @@
+cmake_minimum_required(VERSION 3.22)
+project(MonoGameAndroidHostTests LANGUAGES C CXX)
+
+# Configure with -B pointing outside the checkout. This target compiles the
+# production Android host directly, without Android SDK or a .NET runtime.
+find_package(Threads REQUIRED)
+
+# Build the pinned SDL event queue in this external test tree. No system SDL or
+# developer desktop dependency build is reused, and no video/audio device opens.
+set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+set(SDL_STATIC ON CACHE BOOL "" FORCE)
+set(SDL_TEST OFF CACHE BOOL "" FORCE)
+set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+set(SDL2_DISABLE_SDL2MAIN ON CACHE BOOL "" FORCE)
+set(SDL2_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
+foreach(subsystem AUDIO VIDEO JOYSTICK HAPTIC SENSOR POWER)
+    set(SDL_${subsystem} OFF CACHE BOOL "" FORCE)
+endforeach()
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../external/sdl2/sdl" pinned-sdl)
+
+enable_testing()
+add_executable(android_host_tests ../host.cpp host_tests.cpp header_c.c)
+target_compile_features(android_host_tests PRIVATE cxx_std_17 c_std_11)
+target_compile_definitions(android_host_tests PRIVATE MGP_ANDROID_HOST_TEST)
+target_include_directories(android_host_tests PRIVATE ../../include)
+target_compile_options(android_host_tests PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(android_host_tests PRIVATE Threads::Threads SDL2::SDL2-static)
+add_test(NAME android_host_lifecycle COMMAND android_host_tests)
+set_tests_properties(android_host_lifecycle PROPERTIES TIMEOUT 30)
+
+add_executable(android_session_reuse_tests ../host.cpp session_reuse_tests.cpp)
+target_compile_features(android_session_reuse_tests PRIVATE cxx_std_17)
+target_compile_definitions(android_session_reuse_tests PRIVATE MGP_ANDROID_HOST_TEST)
+target_include_directories(android_session_reuse_tests PRIVATE ../../include)
+target_compile_options(android_session_reuse_tests PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(android_session_reuse_tests PRIVATE Threads::Threads SDL2::SDL2-static)
+target_link_options(android_session_reuse_tests PRIVATE "-Wl,--wrap=SDL_Quit")
+add_test(NAME android_session_reuse COMMAND android_session_reuse_tests)
+set_tests_properties(android_session_reuse PROPERTIES TIMEOUT 30)
+
+add_executable(android_surface_tests ../host.cpp surface_lifecycle_tests.cpp)
+target_compile_features(android_surface_tests PRIVATE cxx_std_17)
+target_compile_definitions(android_surface_tests PRIVATE MGP_ANDROID_HOST_TEST)
+target_include_directories(android_surface_tests PRIVATE ../../include)
+target_compile_options(android_surface_tests PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(android_surface_tests PRIVATE Threads::Threads SDL2::SDL2-static)
+target_link_options(android_surface_tests PRIVATE "-Wl,--wrap=SDL_Quit")
+add_test(NAME android_surface_lifecycle COMMAND android_surface_tests)
+set_tests_properties(android_surface_lifecycle PROPERTIES TIMEOUT 30)
+
+# The actual renderer TU runs against fake Vulkan/allocation dispatch. Built-in
+# effects are unused and get external test-only placeholders, never shader input.
+set(trace_shader_stubs "${CMAKE_CURRENT_BINARY_DIR}/trace-shader-stubs")
+file(MAKE_DIRECTORY "${trace_shader_stubs}")
+foreach(effect AlphaTestEffect BasicEffect DualTextureEffect EnvironmentMapEffect SkinnedEffect SpriteEffect)
+    file(WRITE "${trace_shader_stubs}/${effect}.vk.mgfxo.h" "static const unsigned char ${effect}_vk_mgfxo[] = {0};\n")
+endforeach()
+add_executable(android_vulkan_trace_tests vulkan_trace_tests.cpp vulkan_trace_header_c.c
+    ../host.cpp ../../common/mg_hash.cpp)
+target_compile_features(android_vulkan_trace_tests PRIVATE cxx_std_17 c_std_11)
+target_compile_definitions(android_vulkan_trace_tests PRIVATE MGP_ANDROID_HOST_TEST MG_VULKAN MG_SDL2)
+target_include_directories(android_vulkan_trace_tests PRIVATE ../../include
+    ../../external/volk ../../external/vulkan-headers/include ../../external/vma/include
+    "${trace_shader_stubs}")
+target_compile_options(android_vulkan_trace_tests PRIVATE -ffunction-sections -fdata-sections)
+target_link_options(android_vulkan_trace_tests PRIVATE -Wl,--gc-sections -Wl,--wrap=__assert_fail -Wl,--wrap=clock_gettime)
+target_link_libraries(android_vulkan_trace_tests PRIVATE Threads::Threads SDL2::SDL2-static dl)
+set(MGG_TRACE_SANITIZER "" CACHE STRING "Standalone host sanitizer: address or thread")
+if(MGG_TRACE_SANITIZER)
+    if(NOT MGG_TRACE_SANITIZER MATCHES "^(address|thread)$")
+        message(FATAL_ERROR "MGG_TRACE_SANITIZER must be address or thread")
+    endif()
+    set(trace_sanitizers "${MGG_TRACE_SANITIZER}")
+    if(MGG_TRACE_SANITIZER STREQUAL "address")
+        set(trace_sanitizers "address,undefined")
+    endif()
+    target_compile_options(android_vulkan_trace_tests PRIVATE -fsanitize=${trace_sanitizers} -fno-omit-frame-pointer)
+    target_link_options(android_vulkan_trace_tests PRIVATE -fsanitize=${trace_sanitizers})
+endif()
+add_test(NAME android_vulkan_trace COMMAND android_vulkan_trace_tests)
+set_tests_properties(android_vulkan_trace PROPERTIES TIMEOUT 60)
