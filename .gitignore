@@ -104,3 +104,10 @@ _*
 /native/**/*.make
 /native/**/Makefile
 /native/**/*.mgfxo.h
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*
