@@ -404,7 +404,14 @@ public partial class Texture2D : Texture
             // compressed file size is a little larger.
             MGI.WriteJpg((byte*)ptr, data.Length, width, height, 91, out jpg, out jpgBytes);
 
-            stream.Write(new ReadOnlySpan<byte>(jpg, jpgBytes));
+            try
+            {
+                stream.Write(new ReadOnlySpan<byte>(jpg, jpgBytes));
+            }
+            finally
+            {
+                MGI.FreeRGBA(jpg);
+            }
         }
     }
 
@@ -419,7 +426,14 @@ public partial class Texture2D : Texture
 
             MGI.WritePng((byte*)ptr, data.Length, width, height, out png, out pngBytes);
 
-            stream.Write(new ReadOnlySpan<byte>(png, pngBytes));
+            try
+            {
+                stream.Write(new ReadOnlySpan<byte>(png, pngBytes));
+            }
+            finally
+            {
+                MGI.FreeRGBA(png);
+            }
         }
     }
 
