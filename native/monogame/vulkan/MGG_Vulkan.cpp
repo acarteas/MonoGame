@@ -494,8 +494,7 @@ struct MGG_Shader
 	mguint textureSlots;
 	mguint samplerSlots;
 
-	VkDescriptorPoolCreateInfo* poolInfo;
-	VkDescriptorPool pool;
+	std::vector<VkDescriptorPool> descriptorPools;
 
 	std::queue<MGVK_DescriptorInfo*> freeSets;
 	std::map<uint32_t, MGVK_DescriptorInfo*> usedSets;
@@ -4034,24 +4033,64 @@ static void MGVK_UpdateRenderPass(MGG_GraphicsDevice* device, FrameCounter curre
 	device->deferredOcclusionQueries.clear();
 }
 
-static const int DefaultPoolSize = 16384;
+static constexpr uint32_t DescriptorPoolBatchSize = 256;
 
 static void MGVK_FillDescriptorSetCache(MGG_GraphicsDevice* device, MGG_Shader* shader)
 {
-	// Pre-fill the free descriptor sets now.
-	VkDescriptorSetAllocateInfo alloc_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
-	alloc_info.descriptorPool = shader->pool;
-	alloc_info.descriptorSetCount = 1;
-	alloc_info.pSetLayouts = &shader->setLayout;
-	for (int i = 0; i < DefaultPoolSize; i++)
-	{
-		MGVK_DescriptorInfo* info = new MGVK_DescriptorInfo;
-		info->frame = 0;
-		shader->freeSets.push(info);
 
-		VkResult res = vkAllocateDescriptorSets(device->device, &alloc_info, &info->set);
+	// Grow only when drawing exhausts the free sets. Loading shader variants must
+	// not reserve thousands of driver allocations for variants never drawn.
+	std::vector<VkDescriptorPoolSize> poolSizes;
+	for (const auto& binding : shader->bindings)
+	{
+		auto poolSize = std::find_if(poolSizes.begin(), poolSizes.end(), [&](const VkDescriptorPoolSize& value)
+		{
+			return value.type == binding.descriptorType;
+		});
+		if (poolSize == poolSizes.end())
+		{
+			poolSizes.push_back({ binding.descriptorType, binding.descriptorCount * DescriptorPoolBatchSize });
+		}
+		else
+		{
+			poolSize->descriptorCount += binding.descriptorCount * DescriptorPoolBatchSize;
+		}
+	}
+
+	VkDescriptorPoolCreateInfo poolInfo = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+	poolInfo.maxSets = DescriptorPoolBatchSize;
+	poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+	poolInfo.pPoolSizes = poolSizes.data();
+	VkDescriptorPool pool = VK_NULL_HANDLE;
+	VkResult res = vkCreateDescriptorPool(device->device, &poolInfo, nullptr, &pool);
+	if (res != VK_SUCCESS)
+	{
 		VK_CHECK_RESULT(res);
-		VK_SET_OBJECT_NAME(device->device, info->set, VK_OBJECT_TYPE_DESCRIPTOR_SET, "MGVK_DescriptorInfo.set (Shader id: %u, index: %d)", shader->id, i);
+		std::abort();
+	}
+
+	VkDescriptorSetLayout layouts[DescriptorPoolBatchSize];
+	std::fill_n(layouts, DescriptorPoolBatchSize, shader->setLayout);
+	VkDescriptorSet sets[DescriptorPoolBatchSize];
+	VkDescriptorSetAllocateInfo allocInfo = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+	allocInfo.descriptorPool = pool;
+	allocInfo.descriptorSetCount = DescriptorPoolBatchSize;
+	allocInfo.pSetLayouts = layouts;
+	res = vkAllocateDescriptorSets(device->device, &allocInfo, sets);
+	if (res != VK_SUCCESS)
+	{
+		vkDestroyDescriptorPool(device->device, pool, nullptr);
+		VK_CHECK_RESULT(res);
+		std::abort();
+	}
+
+	shader->descriptorPools.push_back(pool);
+	for (uint32_t i = 0; i < DescriptorPoolBatchSize; i++)
+	{
+		auto info = new MGVK_DescriptorInfo{ 0, sets[i] };
+		shader->freeSets.push(info);
+		VK_SET_OBJECT_NAME(device->device, info->set, VK_OBJECT_TYPE_DESCRIPTOR_SET,
+			"MGVK_DescriptorInfo.set (Shader id: %u, index: %u)", shader->id, i);
 	}
 }
 
@@ -6324,8 +6363,6 @@ MGG_Shader* MGG_Shader_Create(MGG_GraphicsDevice* device, MGShaderStage stage, m
 		res = vkCreateDescriptorSetLayout(device->device, &layoutInfo, nullptr, &shader->setLayout);
 		VK_CHECK_RESULT(res);
 
-		shader->poolInfo = nullptr;
-		shader->pool = nullptr;
 		shader->writes = nullptr;
 		return shader;
 	}
@@ -6340,32 +6377,6 @@ MGG_Shader* MGG_Shader_Create(MGG_GraphicsDevice* device, MGShaderStage stage, m
 	res = vkCreateDescriptorSetLayout(device->device, &layoutInfo, nullptr, &shader->setLayout);
 	VK_CHECK_RESULT(res);
 	VK_SET_OBJECT_NAME(device->device, shader->setLayout, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "MGG_Shader.setLayout (id: %u)", shader->id);
-
-	// Prepare the initial descriptor pool.
-	{
-		VkDescriptorPoolSize* pool_sizes = new VkDescriptorPoolSize[layoutBindings.size()];
-
-		for (int i = 0; i < layoutBindings.size(); i++)
-		{
-			auto& b = layoutBindings[i];
-			pool_sizes[i].type = b.descriptorType;
-			pool_sizes[i].descriptorCount = DefaultPoolSize;
-		}
-
-		shader->poolInfo = new VkDescriptorPoolCreateInfo();
-		shader->poolInfo->sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-		shader->poolInfo->flags = 0;
-		shader->poolInfo->maxSets = DefaultPoolSize;
-		shader->poolInfo->poolSizeCount = layoutBindings.size();
-		shader->poolInfo->pPoolSizes = pool_sizes;
-
-		res = vkCreateDescriptorPool(device->device, shader->poolInfo, nullptr, &shader->pool);
-		VK_CHECK_RESULT(res);
-		VK_SET_OBJECT_NAME(device->device, shader->pool, VK_OBJECT_TYPE_DESCRIPTOR_POOL, "MGG_Shader.pool (id: %u)", shader->id);
-	}
-
-	// Pre-fill the free descriptor sets now.
-	MGVK_FillDescriptorSetCache(device, shader);
 
 	// Prepare the write descriptor set for updates at runtime.
 	VkWriteDescriptorSet* write = shader->writes = new VkWriteDescriptorSet[layoutBindings.size()];
@@ -6438,7 +6449,6 @@ void MGG_Shader_Destroy(MGG_GraphicsDevice* device, MGG_Shader* shader)
 
 	for (auto pair : shader->usedSets)
 	{
-		//vkFreeDescriptorSets(device->device, shader->pool, 1, &pair.second->set);
 		delete pair.second;
 	}
 
@@ -6447,17 +6457,14 @@ void MGG_Shader_Destroy(MGG_GraphicsDevice* device, MGG_Shader* shader)
 		auto free = shader->freeSets.front();
 		shader->freeSets.pop();
 
-		//vkFreeDescriptorSets(device->device, shader->pool, 1, &free->set);
 		delete free;
 	}
 
 	vkDestroyDescriptorSetLayout(device->device, shader->setLayout, nullptr);
 
-	vkDestroyDescriptorPool(device->device, shader->pool, nullptr);
-	if (shader->poolInfo)
+	for (auto pool : shader->descriptorPools)
 	{
-		delete [] shader->poolInfo->pPoolSizes;
-		delete shader->poolInfo;
+		vkDestroyDescriptorPool(device->device, pool, nullptr);
 	}
 
 	vkDestroyShaderModule(device->device, shader->module, nullptr);
