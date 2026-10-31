@@ -329,6 +329,52 @@ namespace MonoGame.Tests.Graphics
             return tex;
         }
 
+        [TestCase(true)]
+        [TestCase(false)]
+        public void ImageSavePropagatesStreamFailureAndLeavesTextureUsable(bool png)
+        {
+            using var source = MakeSampleTexture(gd, 8, 8, SurfaceFormat.Color, out _);
+            using var failing = new FailingImageStream();
+            Assert.That(Assert.Throws<IOException>(() => Save(failing)), Is.SameAs(failing.Failure));
+            using var encoded = new MemoryStream();
+            Save(encoded);
+            encoded.Position = 0;
+            using var decoded = Texture2D.FromStream(gd, encoded);
+            Assert.That(decoded.Width, Is.EqualTo(8));
+            Assert.That(decoded.Height, Is.EqualTo(8));
+
+            void Save(Stream stream)
+            {
+                if (png)
+                {
+                    source.SaveAsPng(stream, 8, 8);
+                }
+                else
+                {
+                    source.SaveAsJpeg(stream, 8, 8);
+                }
+            }
+        }
+
+        private sealed class FailingImageStream : Stream
+        {
+            public IOException Failure { get; } = new IOException("Caller stream failed.");
+            public override bool CanRead => false;
+            public override bool CanSeek => false;
+            public override bool CanWrite => true;
+            public override long Length => throw new NotSupportedException();
+            public override long Position
+            {
+                get => throw new NotSupportedException();
+                set => throw new NotSupportedException();
+            }
+            public override void Flush() { }
+            public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw Failure;
+        }
+
         [Test]
         // Nice small square
         [TestCase(64, 64, SurfaceFormat.Color)]
